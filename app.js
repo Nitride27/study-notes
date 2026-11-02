@@ -1,724 +1,687 @@
-// Leapfrog prep portal: hash-routed vanilla JS, progress in localStorage.
-const $ = (sel, root = document) => root.querySelector(sel);
-const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// Cracked: hash-routed vanilla JS. Progress lives in localStorage, sketches in IndexedDB (they would overflow localStorage).
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s === undefined || s === null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const app = $('#app');
-const KEY = 'lfprep-v1';
-const S = Object.assign({ lang: 'py', p: {}, mcq: {}, lessons: {}, mocks: [], mock: null }, JSON.parse(localStorage.getItem(KEY) || '{}'));
-const save = () => localStorage.setItem(KEY, JSON.stringify(S));
-const P = Object.fromEntries(PROBLEMS.map(p => [p.id, p]));
-const L = Object.fromEntries(LESSONS.map(l => [l.id, l]));
-const LANG_NAME = { py: 'Python', js: 'JavaScript' };
-const ps = id => (S.p[id] = S.p[id] || { stage: 0, logic: {}, blanks: {}, code: {}, secs: 0, hintsEarly: 0 });
-const lfRep = id => LF_HOT[id] && LF_HOT[id] !== 'pick'; // value is the source quote
-const lfTag = id => lfRep(id) ? ` <span class="pill lf-rep" title="${esc(LF_HOT[id])}">★ Reported</span>` : LF_HOT[id] ? ' <span class="pill lf-pick" title="Classic problem for a topic Leapfrog candidates reported">Leapfrog pick</span>' : '';
-const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-
-let timers = [];
-const every = (ms, f) => timers.push(setInterval(f, ms));
-const handlers = {}; // data-act -> fn(el, event)
-document.addEventListener('click', e => {
-  const el = e.target.closest('[data-act]');
-  if (el && handlers[el.dataset.act]) handlers[el.dataset.act](el, e);
-});
-
-$('#lang').value = S.lang;
-$('#lang').onchange = e => { S.lang = e.target.value; save(); route(); };
-
-// ---------- shared widgets ----------
-function mcqHTML(key, q, chosen) {
-  const answered = chosen !== undefined && chosen !== null;
-  return `<div class="q" id="q-${key}">
-    <div style="white-space:pre-wrap"><b>${esc(q.q)}</b></div>
-    ${q.code ? `<pre><code data-lang="${guessLang(q.code)}">${esc(q.code)}</code></pre>` : ''}
-    ${q.opts.map((o, i) => `<button class="opt ${answered ? (i === q.a ? 'right' : i === chosen ? 'wrong' : '') : ''}" ${answered ? 'disabled' : ''} data-act="mcq" data-key="${key}" data-i="${i}">${String.fromCharCode(65 + i)}. ${esc(o)}</button>`).join('')}
-    ${answered ? `<div class="why">${chosen === q.a ? '<b class="ok">Correct.</b> ' : '<b class="bad">Not quite.</b> '}${esc(q.why)}</div>` : ''}
-  </div>`;
+const KEY = 'cracked-v1';
+const blank = { xp: 0, days: {}, lessons: {}, teach: {}, p: {}, projects: {}, unlocked: {}, pace: 'steady' };
+const S = (() => {
+  const raw = localStorage.getItem(KEY);
+  try { return Object.assign({}, blank, JSON.parse(raw || '{}')); }
+  catch { localStorage.setItem(KEY + '-corrupt-' + Date.now(), raw); return { ...blank }; } // keep the bad copy; never overwrite it
+})();
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(S)); }
+  catch { toast('Browser storage is full. Export a backup from Settings.'); }
 }
-const mcqAnswer = {}; // key -> fn(i)
-handlers.mcq = el => mcqAnswer[el.dataset.key] && mcqAnswer[el.dataset.key](+el.dataset.i);
+const day = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const addDays = (n, from = new Date()) => { const d = new Date(from); d.setDate(d.getDate() + n); return day(d); };
+const dayLog = () => (S.days[day()] = S.days[day()] || { xp: 0, read: 0, solved: 0, bonus: 0, done: [] });
 
-function codeEditor(ta, lang, onRun) {
-  if (window.CodeMirror) {
-    const n = lang === 'py' ? 4 : 2;
-    const cm = CodeMirror.fromTextArea(ta, {
-      mode: lang === 'py' ? 'python' : 'javascript', theme: 'lf', lineNumbers: true, indentUnit: n, tabSize: n,
-      indentWithTabs: false, matchBrackets: true, autoCloseBrackets: true, styleActiveLine: true, viewportMargin: Infinity,
-      extraKeys: {
-        Tab: c => c.somethingSelected() ? c.indentSelection('add') : c.replaceSelection(' '.repeat(n)),
-        'Shift-Tab': 'indentLess', 'Ctrl-Enter': () => onRun(), 'Cmd-Enter': () => onRun()
-      }
-    });
-    cm.on('change', () => { cm.save(); ta.dispatchEvent(new Event('input')); }); // keep textarea as the source of truth
-    ta.cm = cm;
-    return;
-  }
-  const unit = lang === 'py' ? '    ' : '  ';
-  ta.addEventListener('keydown', e => {
-    const { selectionStart: s, selectionEnd: en, value: v } = ta;
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      const lineStart = v.lastIndexOf('\n', s - 1) + 1;
-      if (e.shiftKey) {
-        if (v.startsWith(unit, lineStart)) { ta.setRangeText('', lineStart, lineStart + unit.length, 'end'); }
-      } else ta.setRangeText(unit, s, en, 'end');
-    } else if (e.key === 'Enter' && !e.ctrlKey) {
-      e.preventDefault();
-      const line = v.slice(v.lastIndexOf('\n', s - 1) + 1, s);
-      let indent = line.match(/^\s*/)[0];
-      if (/[:{[(]\s*$/.test(line)) indent += unit;
-      ta.setRangeText('\n' + indent, s, en, 'end');
-    } else if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); onRun(); return; }
-    else return;
-    ta.dispatchEvent(new Event('input'));
-  });
+// ---------- content index ----------
+const BANK = Object.fromEntries((window.PROBLEMS || []).map(p => [p.id, p]));
+const stripBlanks = c => c.replace(/⟦([^⟧]*)⟧/g, (_, a) => a.split('¦')[0]);
+function fromBank(p) {
+  const list = p.io && (p.io.ret === 'list' || (p.io.args || []).some(k => k === 'list' || k === 'cycle'));
+  return {
+    id: p.id, title: p.title, diff: p.diff, time: p.time, desc: p.desc, constraints: p.constraints,
+    ex: (p.examples || []).map(e => [e.in, e.out, e.why]),
+    start: `${list ? '# ListNode(val=0, next=None) is predefined: node.val, node.next\n' : ''}def ${p.fn.py}(${p.params.join(', ')}):\n    `,
+    nudge: p.hints, sol: stripBlanks(p.sol.py), big: p.complexity, idea: p.takeaway,
+    tests: p.tests.map(([a, e]) => ({ a, e, fn: p.fn.py, io: p.io || {}, cmp: p.compare, label: p.params.map((n, i) => `${n} = ${JSON.stringify(a[i])}`).join(', ') }))
+  };
 }
-
-// Colour every <pre><code data-lang> added to the page (lessons, solutions, syntax sheet).
-function guessLang(code) { return /console\.log|const |let |=>|function /.test(code) ? 'js' : /print\(|def |import |\bin range/.test(code) ? 'py' : ''; }
-function highlight(root) {
-  if (!window.CodeMirror || !CodeMirror.runMode) return;
-  root.querySelectorAll('pre code[data-lang]:not([data-hl])').forEach(el => {
-    el.dataset.hl = 1;
-    if (!el.dataset.lang) return;
-    CodeMirror.runMode(el.textContent, el.dataset.lang === 'py' ? 'python' : 'javascript', el);
-    el.parentElement.classList.add('cm-s-lf');
-  });
+const P = {}, PU = {};
+for (const u of UNITS) {
+  u.core = u.core || []; u.extra = u.extra || [];
+  const norm = x => {
+    const p = typeof x === 'string' ? fromBank(BANK[x]) : { ...x, tests: x.tests.map(([c, w, s]) => ({ c, w, s, label: c })) };
+    P[p.id] = p; PU[p.id] = u; return p.id;
+  };
+  u.core = u.core.map(norm); u.extra = u.extra.map(norm);
+  if (u.boss) { u.boss = norm(u.boss); P[u.boss].boss = true; }
 }
-let hlQueued = false;
-new MutationObserver(() => { if (!hlQueued) { hlQueued = true; requestAnimationFrame(() => { hlQueued = false; highlight(app); }); } }).observe(app, { childList: true, subtree: true });
+const U = Object.fromEntries(UNITS.map(u => [u.id, u]));
+const ps = id => (S.p[id] = S.p[id] || { stage: 'rough', example: '', algo: '', code: '', secs: 0, nudges: 0, fails: 0 });
+const solved = id => !!(S.p[id] && S.p[id].solved);
+const required = u => [...u.core, ...(u.boss ? [u.boss] : [])];
+const cleared = u => u.project
+  ? u.project.check.every((_, i) => (S.projects[u.id] || {})[i])
+  : !!S.lessons[u.id] && required(u).every(solved);
+const isOpen = u => { const i = UNITS.indexOf(u); return i === 0 || !!S.unlocked[u.id] || cleared(UNITS[i - 1]) || cleared(u) || !!S.lessons[u.id]; };
+const current = () => UNITS.find(u => !cleared(u));
+const SHEETS = () => UNITS.reduce((n, u) => n + (u.project ? 1 : 1 + required(u).length), 0);
+const sheetsDone = () => UNITS.reduce((n, u) => n + (u.project ? (cleared(u) ? 1 : 0) : (S.lessons[u.id] ? 1 : 0) + required(u).filter(solved).length), 0);
 
-// ---------- toasts ----------
-function toast(msg, kind = '') {
+// ---------- rewards ----------
+const RANKS = [[0, 'Blank page'], [150, 'Tracer'], [500, 'Translator'], [1200, 'Pattern spotter'], [2500, 'Problem solver'], [4500, 'Tree climber'], [7000, 'Graph walker'], [10000, 'DP survivor'], [14000, 'API builder'], [19000, 'Backend engineer'], [25000, 'Model maker'], [32000, 'Cracked']];
+const rank = (xp = S.xp) => [...RANKS].reverse().find(([n]) => xp >= n)[1];
+function nextRank() { const r = RANKS.find(([n]) => S.xp < n); return r ? `${r[0] - S.xp} XP to ${r[1]}` : 'Top of the pad'; }
+function streak() {
+  let n = 0, d = new Date();
+  if (!(S.days[day(d)] && S.days[day(d)].xp)) d.setDate(d.getDate() - 1); // today not started yet doesn't break it
+  while (S.days[day(d)] && S.days[day(d)].xp) { n++; d.setDate(d.getDate() - 1); }
+  return n;
+}
+function gain(xp, doneKey) {
+  const before = rank(), log = dayLog();
+  S.xp += xp; log.xp += xp;
+  if (doneKey && !log.done.includes(doneKey)) log.done.push(doneKey);
+  save(); head();
+  if (rank() !== before) { toast(`New rank: ${rank()}`); stamp(rank()); }
+}
+function stamp(text) {
+  const el = $('#stamp');
+  el.innerHTML = `<span>${esc(text)}</span>`; el.classList.add('on');
+  setTimeout(() => el.classList.remove('on'), 1400);
+}
+function toast(msg) {
   const t = document.createElement('div');
-  t.className = 'toast ' + kind; t.innerHTML = msg;
-  $('#toasts').appendChild(t);
-  setTimeout(() => t.classList.add('out'), 3200);
-  setTimeout(() => t.remove(), 3700);
+  t.className = 'toast'; t.textContent = msg; $('#toasts').appendChild(t);
+  setTimeout(() => t.remove(), 3600);
 }
+const GAP = [3, 7, 21, 60, 180]; // days until the next rematch, per successful round
+const BASE = { Easy: 30, Medium: 60, Hard: 100 };
 
-function starter(p, lang) {
-  const isList = p.io && (p.io.ret === 'list' || (p.io.args || []).some(k => k === 'list' || k === 'cycle'));
-  if (lang === 'py') return `${isList ? '# ListNode(val=0, next=None) is predefined: node.val, node.next\n' : ''}def ${p.fn.py}(${p.params.join(', ')}):\n    `;
-  return `${isList ? '// ListNode(val, next) is predefined: new ListNode(1), node.val, node.next\n' : ''}function ${p.fn.js}(${p.params.join(', ')}) {\n  \n}\n`;
-}
-
-function argsLabel(p, args) { return p.params.map((n, i) => `${n} = ${JSON.stringify(args[i])}`).join(', '); }
-
-function resultsHTML(p, tests, r) {
-  if (r.compileError) return `<div class="t fail"><b class="bad">Error</b>\n<pre>${esc(r.compileError)}</pre></div>`;
-  const pass = r.results.filter((x, i) => !x.error && checkResult(x.out, tests[i][1], p.compare)).length;
-  return `<div class="spread"><b class="${pass === tests.length ? 'ok' : 'bad'}">${pass} / ${tests.length} tests passed</b></div>` +
-    r.results.map((x, i) => {
-      const ok = !x.error && checkResult(x.out, tests[i][1], p.compare);
-      const exp = tests[i][1] && tests[i][1].anyOf ? tests[i][1].anyOf.map(a => JSON.stringify(a)).join(' or ') : JSON.stringify(tests[i][1]);
-      return `<div class="t ${ok ? 'pass' : 'fail'}">${ok ? '✅' : '❌'} ${esc(argsLabel(p, tests[i][0]))}
-        ${ok ? '' : `<div>expected: ${esc(exp)}</div><div>got: <span class="bad">${esc(x.error || x.out)}</span></div>`}
-        ${x.log ? `<div class="log">stdout: ${esc(x.log)}</div>` : ''}</div>`;
-    }).join('');
-}
-
-// ---------- views ----------
-function viewPlan() {
-  const exam = new Date(EXAM_AT);
-  const solved = PROBLEMS.filter(p => S.p[p.id] && S.p[p.id].solved).length;
-  const read = LESSONS.filter(l => S.lessons[l.id]).length;
-  const mcqRight = MCQS.filter(q => S.mcq[q.id] === true).length;
-  const next = planOrder().find(id => !(S.p[id] && S.p[id].solved));
-  const revisit = revisitList();
-  const nowInfo = planNow();
-  const blockHTML = b => {
-    const items = [];
-    (b.lessons || []).forEach(id => items.push(`<a href="#/learn/${id}">${S.lessons[id] ? '✓ ' : '📘 '}${esc(L[id].title)}</a>`));
-    (b.problems || []).forEach(id => items.push(`<a href="#/p/${id}">${S.p[id] && S.p[id].solved ? '✓ ' : ''}${esc(P[id].title)} <span class="pill ${P[id].diff}">${P[id].diff[0]}</span>${lfTag(id)}</a>`));
-    (b.mcq || []).forEach(c => items.push(`<a href="#/mcq/${c}">❓ ${esc(MCQ_CATS[c])}</a>`));
-    if (b.mock) items.push(`<a href="#/mock">⏱ Start mock exam</a>`);
-    if (b.revisit) items.push(`<span class="small mute">Revisit list (${revisit.length}) is shown in the panel above.</span>`);
-    if (b.link) items.push(`<a href="${b.link}">Open</a>`);
-    if (b.extra) items.push(`<div class="small" style="margin-top:4px"><span class="mute">Extra if ahead of schedule:</span> ${b.extra.map(id => `<a href="#/p/${id}">${S.p[id] && S.p[id].solved ? '✓ ' : ''}${esc(P[id].title)} <span class="pill ${P[id].diff}">${P[id].diff[0]}</span>${lfTag(id)}</a>`).join(' ')}</div>`);
-    const total = (b.problems || []).length, done = (b.problems || []).filter(id => S.p[id] && S.p[id].solved).length;
-    const cls = b === nowInfo.cur ? 'now' : (nowInfo.behind || []).includes(b) ? 'behind' : '';
-    return `<div class="block ${cls}"><div class="t">${b.t}${cls === 'now' ? '<div class="nowtag">NOW</div>' : cls === 'behind' ? '<div class="behindtag">unfinished</div>' : ''}</div><div class="b"><div class="spread"><b>${esc(b.title)}</b>${total ? `<span class="small mute">${done}/${total}</span>` : ''}</div>
-      <div class="links">${items.join(' ')}</div></div></div>`;
+// ---------- sketch storage ----------
+const store = (() => {
+  let db;
+  const open = () => db || (db = new Promise((res, rej) => {
+    const r = indexedDB.open('cracked', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  const tx = async (mode, f) => {
+    const d = await open();
+    return new Promise((res, rej) => { const q = f(d.transaction('kv', mode).objectStore('kv')); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
   };
-  app.innerHTML = `
-  <div class="hero">
-    <div class="card">
-      <div class="mute small">Leapfrog on-site coding exam · Mon 2 Nov, 7:30 AM · 3 MCQ + 2 problems · 60 min</div>
-      <div class="countdown" id="cd"></div>
-      <div class="row" style="margin-top:12px">
-        ${next ? `<a class="btn primary" href="#/p/${next}">Next up: ${esc(P[next].title)} →</a>` : '<span class="ok">All plan problems solved 🎉</span>'}
-        <a class="btn" href="#/mock">Mock exam</a>
-        <a class="btn" href="#/learn/strategy">Exam game plan</a>
-      </div>
-    </div>
-    <div class="card">
-      <div class="spread"><span>Problems solved</span><b>${solved}/${PROBLEMS.length}</b></div><div class="bar"><i style="width:${solved / PROBLEMS.length * 100}%"></i></div>
-      <div class="spread" style="margin-top:10px"><span>Lessons read</span><b>${read}/${LESSONS.length}</b></div><div class="bar"><i style="width:${read / LESSONS.length * 100}%"></i></div>
-      <div class="spread" style="margin-top:10px"><span>MCQs correct</span><b>${mcqRight}/${MCQS.length}</b></div><div class="bar"><i style="width:${mcqRight / MCQS.length * 100}%"></i></div>
-      <div class="small mute" style="margin-top:10px">Mocks taken: ${S.mocks.length}${S.mocks.length ? ` · last score ${S.mocks[S.mocks.length - 1].score}%` : ''}</div>
-    </div>
-  </div>
-  ${nowCard(nowInfo)}
-  ${revisit.length ? `<div class="card"><h3 style="margin-top:0">🔁 Revisit list: rewrite these from scratch</h3><div class="links">${revisit.map(id => `<a href="#/p/${id}" style="margin-right:12px">${esc(P[id].title)}</a>`).join('')}</div></div>` : ''}
-  <div class="card small mute">How each problem works: <b>1 Think</b> (guided logic questions) → <b>2 Fill the gaps</b> (key lines, ${LANG_NAME[S.lang]} syntax) → <b>3 Write it</b> (whole solution from a blank editor, real tests) → <b>4 Review</b>. Hints unlock with time so you struggle a bit first, but not too long. Respect the time-box shown on each problem.</div>
-  ${PLAN.map(d => `<div class="card plan-day"><h3>${esc(d.day)}</h3>${d.blocks.map(blockHTML).join('')}</div>`).join('')}
-  <div class="card"><div class="spread"><div><b>Backup</b><div class="small mute">Progress lives in this browser only. Export it before switching browser or clearing data.</div></div>
-    <div class="row"><button class="btn" data-act="exportProgress">⬇ Export progress</button><label class="btn">⬆ Import<input type="file" accept=".json" id="importFile" hidden></label><button class="btn ghost small" data-act="reset">Reset all</button></div></div></div>`;
-  $('#importFile').onchange = e => {
-    const f = e.target.files[0]; if (!f) return;
-    f.text().then(txt => {
-      const data = JSON.parse(txt);
-      if (!data || typeof data.p !== 'object') throw new Error('not a progress file');
-      if (!confirm('Replace current progress with this backup?')) return;
-      localStorage.setItem(KEY, JSON.stringify(data)); location.reload();
-    }).catch(err => toast('Import failed: ' + esc(err.message), 'bad'));
+  return {
+    get: k => tx('readonly', o => o.get(k)), set: (k, v) => tx('readwrite', o => o.put(v, k)), del: k => tx('readwrite', o => o.delete(k)),
+    all: async () => { const keys = await tx('readonly', o => o.getAllKeys()), vals = await tx('readonly', o => o.getAll()); return Object.fromEntries(keys.map((k, i) => [k, vals[i]])); }
   };
-  const cd = () => {
-    const ms = exam - Date.now();
-    if (ms <= 0) { $('#cd').textContent = 'Exam time. You got this.'; return; }
-    const d = Math.floor(ms / 864e5), h = Math.floor(ms / 36e5) % 24, m = Math.floor(ms / 6e4) % 60, s = Math.floor(ms / 1e3) % 60;
-    $('#cd').textContent = `${d}d ${h}h ${m}m ${s}s to go`;
-  };
-  cd(); every(1000, cd);
-}
-handlers.exportProgress = () => {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(S, null, 1)], { type: 'application/json' }));
-  a.download = `leapfrog-prep-progress-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click(); URL.revokeObjectURL(a.href);
-  toast('Progress exported', 'ok');
-};
-function nowCard(n) {
-  const solvedOf = b => (b.problems || []).filter(id => S.p[id] && S.p[id].solved).length;
-  const firstOpen = b => (b.problems || []).find(id => !(S.p[id] && S.p[id].solved));
-  let body;
-  if (n.before) body = `The plan starts <b>Saturday ${PLAN[0].blocks[0].t.split("–")[0]}</b>. Tonight: read the <a href="#/learn/strategy">Exam game plan</a> and get a good sleep.`;
-  else if (!n.day) body = `Outside the planned days. Keep going with <b>Next up</b> or take a mock exam.`;
-  else if (n.cur) {
-    const open = firstOpen(n.cur), total = (n.cur.problems || []).length;
-    body = `<b>${esc(n.cur.title)}</b>${total ? ` · ${solvedOf(n.cur)}/${total} done` : ''}${open ? ` · <a href="#/p/${open}">continue with ${esc(P[open].title)} →</a>` : n.cur.mock ? ' · <a href="#/mock">start the mock →</a>' : ''}`;
-  } else if (n.next && n.next === n.day.blocks[0]) body = `Today starts at <b>${n.next.t.split('–')[0]}</b> with ${esc(n.next.title)}. Sleep first, because a rested brain codes faster.`;
-  else body = n.next ? `Break time. Next block at <b>${n.next.t.split('–')[0]}</b>: ${esc(n.next.title)}` : `Done for today. Sleep well, because rest is part of the prep.`;
-  const behind = (n.behind || []).length ? `<div class="small warn" style="margin-top:6px">⚠ ${n.behind.length} earlier block(s) unfinished. Don't chase all of them: finish the Easy/Medium core and move on with the schedule.</div>` : '';
-  return `<div class="card nowcard"><div class="small mute">📍 Right now · ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div><div style="margin-top:4px">${body}</div>${behind}</div>`;
-}
-handlers.reset = () => { if (confirm('Erase ALL progress, code and mock history?')) { localStorage.removeItem(KEY); location.reload(); } };
+})();
 
-// core problems in schedule order, then the optional extras
-const planOrder = () => [...PLAN.flatMap(d => d.blocks.flatMap(b => b.problems || [])), ...PLAN.flatMap(d => d.blocks.flatMap(b => b.extra || []))];
-
-// Where should I be right now according to the plan?
-function planNow() {
-  const now = new Date();
-  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const mins = now.getHours() * 60 + now.getMinutes();
-  const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-  const day = PLAN.find(d => d.date === today);
-  if (!day) return { before: today < PLAN[0].date };
-  const spans = day.blocks.map(b => { const [a, z] = b.t.split('–'); return { b, start: toMin(a), end: toMin(z || a) + (z ? 0 : 15) }; });
-  const cur = spans.find(x => mins >= x.start && mins < x.end);
-  const next = spans.find(x => x.start >= mins);
-  const behind = spans.filter(x => x.end <= mins && (x.b.problems || []).some(id => !(S.p[id] && S.p[id].solved))).map(x => x.b);
-  return { day, cur: cur && cur.b, next: next && next.b, behind };
-}
-
-function revisitList() {
-  return PROBLEMS.filter(p => { const s = S.p[p.id]; return s && ((s.revealed && !s.solvedClean) || s.conf === 0); }).map(p => p.id);
-}
-
-function viewLearn() {
-  app.innerHTML = `<h1>Learn the patterns</h1><p class="mute">Each lesson takes 10–20 min: when to use the pattern, a template in ${LANG_NAME[S.lang]}, pitfalls, and a quick check. Then go and solve the linked problems.</p>
-  <div class="grid">${LESSONS.map(l => {
-    const probs = PROBLEMS.filter(p => p.pattern === l.id);
-    const done = probs.filter(p => S.p[p.id] && S.p[p.id].solved).length;
-    return `<a class="card" href="#/learn/${l.id}" style="color:inherit;text-decoration:none">
-      <div class="spread"><b>${S.lessons[l.id] ? '✓ ' : ''}${esc(l.title)}</b><span class="pill">${l.mins}m</span></div>
-      ${probs.length ? `<div class="small mute" style="margin-top:6px">${done}/${probs.length} problems solved</div><div class="bar" style="margin-top:6px"><i style="width:${done / probs.length * 100}%"></i></div>` : ''}
-    </a>`;
-  }).join('')}</div>`;
-}
-
-function viewLesson(id) {
-  const l = L[id];
-  if (!l) return viewLearn();
-  const probs = PROBLEMS.filter(p => p.pattern === id);
-  const chosen = S.lessons['_c_' + id] || {};
-  app.innerHTML = `<div class="lesson">
-    <a href="#/learn" class="small">← all lessons</a>
-    <h1>${esc(l.title)}</h1>
-    <div class="card">${l.body.map(b => typeof b === 'string' ? b : `<pre><code data-lang="${S.lang}">${esc(b[S.lang])}</code></pre><div class="small mute">Showing ${LANG_NAME[S.lang]}. Switch language at the top right.</div>`).join('')}</div>
-    ${l.checks && l.checks.length ? `<div class="card"><h3 style="margin-top:0">Quick check</h3>${l.checks.map((q, i) => mcqHTML(`l-${id}-${i}`, q, chosen[i])).join('')}</div>` : ''}
-    ${probs.length ? `<div class="card"><h3 style="margin-top:0">Practice this pattern</h3>${problemTable(probs)}</div>` : ''}
-    <button class="btn primary" data-act="lessonRead">${S.lessons[id] ? '✓ Read' : 'Mark as read'}</button>
-  </div>`;
-  (l.checks || []).forEach((q, i) => {
-    mcqAnswer[`l-${id}-${i}`] = choice => {
-      S.lessons['_c_' + id] = Object.assign(S.lessons['_c_' + id] || {}, { [i]: choice }); save();
-      $(`#q-l-${id}-${i}`).outerHTML = mcqHTML(`l-${id}-${i}`, q, choice);
-    };
-  });
-  handlers.lessonRead = () => { S.lessons[id] = true; save(); toast('📘 Lesson marked as read', 'ok'); route(); };
-}
-
-function problemTable(list) {
-  return `<table><tr><th>Problem</th><th>Difficulty</th><th>Pattern</th><th>Time-box</th><th>Status</th></tr>${list.map(p => {
-    const s = S.p[p.id];
-    const status = !s ? '<span class="mute">not started</span>' : s.solved ? `<span class="ok">solved</span>${s.revealed && !s.solvedClean ? ' <span class="warn">(after peeking)</span>' : ''}` : `<span class="warn">in progress · ${fmt(s.secs)}</span>`;
-    return `<tr class="click${lfRep(p.id) ? ' lf-row' : ''}" onclick="location.hash='#/p/${p.id}'"><td>${esc(p.title)}${lfTag(p.id)}</td><td><span class="pill ${p.diff}">${p.diff}</span></td><td class="small">${esc(L[p.pattern].title)}</td><td class="small">${p.time} min</td><td class="small">${status}</td></tr>`;
-  }).join('')}</table>`;
-}
-
-function viewProblems() {
-  const f = S.filter || 'All';
-  const list = PROBLEMS.filter(p => f === 'All' || (f === 'Leapfrog' ? LF_HOT[p.id] : p.diff === f));
-  app.innerHTML = `<div class="spread"><h1>Problems</h1><div class="row">${['All', 'Easy', 'Medium', 'Hard', 'Leapfrog'].map(d => `<button class="btn ${f === d ? 'primary' : ''}" data-act="filter" data-d="${d}">${d === 'Leapfrog' ? '★ Leapfrog only' : d}</button>`).join('')}</div></div>
-  <p class="mute small">Grouped by pattern, in plan order. Leapfrog reportedly asks one easy and one medium problem, so make Easy/Medium automatic and treat Hard as a stretch. <span class="pill lf-rep">★ Reported</span> = candidates named this exact problem. <span class="pill lf-pick">Leapfrog pick</span> = classic problem for a reported topic (arrays, strings, hashmap, two pointers, stack, linked list).</p>
-  ${LESSONS.filter(l => list.some(p => p.pattern === l.id)).map(l => `<div class="card"><h3 style="margin-top:0"><a href="#/learn/${l.id}">${esc(l.title)}</a></h3>${problemTable(list.filter(p => p.pattern === l.id))}</div>`).join('')}`;
-  handlers.filter = el => { S.filter = el.dataset.d; save(); route(); };
-}
-
-// ---------- problem page ----------
-const STAGES = ['1 · Think', '2 · Fill the gaps', '3 · Write it', '4 · Review'];
-function viewProblem(id) {
-  const p = P[id];
-  if (!p) return viewProblems();
-  const st = ps(id);
-  const lang = S.lang;
-  if (st.view === undefined) st.view = st.stage;
-  const hintAt = [0.25, 0.5, 0.75].map(f => Math.round(p.time * 60 * f));
-
-  app.innerHTML = `
-  <div class="spread"><div><div class="row small">${prevNext(id)}</div><h1 style="margin-bottom:4px">${esc(p.title)}</h1>
-    <span class="pill ${p.diff}">${p.diff}</span> <a class="pill" href="#/learn/${p.pattern}">${esc(L[p.pattern].title)}</a>${lfTag(id)} ${st.solved ? '<span class="pill Easy">solved ✓</span>' : ''}</div>
-    <div class="card" style="min-width:300px;margin:0;padding:12px 16px"><div class="small mute">Time-box ${p.time} min</div><div class="timebox"><b id="clock">${fmt(st.secs)}</b><div class="bar" id="tbar"><i></i></div></div></div>
-  </div>
-  <div class="split" style="margin-top:14px">
-    <div class="card sticky">
-      ${p.desc}
-      ${p.examples.map(e => `<div class="ex"><div><span class="mute">Input:</span> ${esc(e.in)}</div><div><span class="mute">Output:</span> ${esc(e.out)}</div>${e.why ? `<div class="mute">// ${esc(e.why)}</div>` : ''}</div>`).join('')}
-      <div class="small mute"><b>Constraints:</b> ${p.constraints.map(esc).join(' · ')}</div>
-      <h3>Hints</h3><div id="hints"></div>
-    </div>
-    <div>
-      <div class="tabs">${STAGES.map((n, i) => `<div class="tab ${i === st.view ? 'on' : ''} ${i > st.stage ? 'locked' : ''} ${stageDone(i) ? 'done' : ''}" data-act="stage" data-i="${i}">${n}</div>`).join('')}</div>
-      <div class="card" id="stage"></div>
-    </div>
-  </div>`;
-
-  function stageDone(i) {
-    return [p.logic.every((_, j) => st.logic[j] !== undefined), !!(st.blanks[lang] && st.blanks[lang].done), !!st.solved, st.conf !== undefined][i];
+// ---------- sketch pad ----------
+const W = 1000, H = 600, INK = { g: '#262B26', r: '#BF2E1B', b: '#1B4A9E' };
+function paint(ctx, strokes, scale) {
+  ctx.save(); ctx.scale(scale, scale); ctx.lineCap = ctx.lineJoin = 'round'; ctx.lineWidth = 2.4;
+  for (const s of strokes) {
+    ctx.strokeStyle = ctx.fillStyle = INK[s.c] || INK.g;
+    if (s.t === 'p') { ctx.beginPath(); s.pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.stroke(); }
+    if (s.t === 'b') ctx.strokeRect(s.x, s.y, s.w, s.h);
+    if (s.t === 'a') {
+      const a = Math.atan2(s.y2 - s.y, s.x2 - s.x);
+      ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x2, s.y2);
+      ctx.lineTo(s.x2 - 13 * Math.cos(a - .45), s.y2 - 13 * Math.sin(a - .45)); ctx.moveTo(s.x2, s.y2); ctx.lineTo(s.x2 - 13 * Math.cos(a + .45), s.y2 - 13 * Math.sin(a + .45)); ctx.stroke();
+    }
+    if (s.t === 'x') { ctx.font = '24px "Patrick Hand", "Architects Daughter", cursive'; ctx.fillText(s.s, s.x, s.y); }
+    if (s.t === 'c') {
+      ctx.font = '20px "DM Mono", monospace'; ctx.textAlign = 'center';
+      s.v.forEach((v, i) => { ctx.strokeRect(s.x + i * 52, s.y, 52, 48); ctx.fillText(v, s.x + i * 52 + 26, s.y + 31); });
+      ctx.textAlign = 'start';
+    }
   }
-  const hintsHTML = () => p.hints.map((h, i) => {
-    const open = (st.hintsOpen || 0) > i;
-    const unlocked = st.secs >= hintAt[i] || st.solved;
-    if (open) return `<div class="hint"><b>Hint ${i + 1}:</b> ${esc(h)}</div>`;
-    if (i > (st.hintsOpen || 0)) return '';
-    return `<div class="hint locked">Hint ${i + 1} ${unlocked ? `<button class="btn" data-act="hint">Reveal</button>` : `unlocks at ${fmt(hintAt[i])}. Keep thinking. <button class="btn ghost small" data-act="hintEarly">I'm truly stuck</button>`}</div>`;
+  ctx.restore();
+}
+function near(s, x, y) {
+  const inBox = (a, b, c, d) => x >= Math.min(a, c) - 10 && x <= Math.max(a, c) + 10 && y >= Math.min(b, d) - 10 && y <= Math.max(b, d) + 10;
+  if (s.t === 'p') return s.pts.some(([a, b]) => Math.hypot(a - x, b - y) < 14);
+  if (s.t === 'b') return inBox(s.x, s.y, s.x + s.w, s.y + s.h);
+  if (s.t === 'a') return inBox(s.x, s.y, s.x2, s.y2);
+  if (s.t === 'x') return inBox(s.x, s.y - 24, s.x + s.s.length * 13, s.y + 4);
+  if (s.t === 'c') return inBox(s.x, s.y, s.x + s.v.length * 52, s.y + 48);
+}
+function fit(canvas) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth || 600;
+  canvas.width = w * dpr; canvas.height = w * dpr * H / W;
+  return canvas.width / W;
+}
+function mountPad(host, key) {
+  host.innerHTML = `<div class="padbox">
+    <div class="tools" role="toolbar" aria-label="Sketch tools">
+      ${[['p', 'Pencil'], ['b', 'Box'], ['a', 'Arrow'], ['x', 'Text'], ['c', 'Cells'], ['e', 'Eraser']].map(([k, n]) => `<button data-tool="${k}" aria-pressed="${k === 'p'}">${n}</button>`).join('')}
+      <input type="text" id="padText" placeholder="text or: 2 7 11 15" aria-label="Words for the Text tool, or space-separated values for the Cells tool">
+      ${[['g', 'Graphite'], ['r', 'Red'], ['b', 'Blue']].map(([k, n]) => `<button class="swatch" data-ink="${k}" style="background:${INK[k]}" aria-pressed="${k === 'g'}" aria-label="${n} pencil"></button>`).join('')}
+      <button data-do="undo">Undo</button><button data-do="clear">Clear</button>
+    </div>
+    <canvas class="pad" role="img" aria-label="Your rough sketch. Draw here with mouse, pen or finger."></canvas></div>`;
+  const cv = $('canvas', host), ctx = cv.getContext('2d');
+  let strokes = [], tool = 'p', ink = 'g', live = null, scale = fit(cv), timer;
+  const draw = () => { ctx.clearRect(0, 0, cv.width, cv.height); paint(ctx, live ? [...strokes, live] : strokes, scale); };
+  const persist = () => { clearTimeout(timer); timer = setTimeout(() => store.set(key, strokes).catch(() => toast('Your sketch could not be saved in this browser.')), 300); };
+  store.get(key).then(v => { if (v) { strokes = v; draw(); } }).catch(() => {});
+  const at = e => { const r = cv.getBoundingClientRect(); return [Math.round((e.clientX - r.left) / r.width * W), Math.round((e.clientY - r.top) / r.height * H)]; };
+  cv.onpointerdown = e => {
+    cv.setPointerCapture(e.pointerId);
+    const [x, y] = at(e), words = $('#padText', host).value.trim();
+    if (tool === 'p') live = { t: 'p', c: ink, pts: [[x, y]] };
+    if (tool === 'b') live = { t: 'b', c: ink, x, y, w: 0, h: 0 };
+    if (tool === 'a') live = { t: 'a', c: ink, x, y, x2: x, y2: y };
+    if (tool === 'e') { strokes = strokes.filter(s => !near(s, x, y)); live = { t: 'e' }; draw(); }
+    if (tool === 'x' || tool === 'c') {
+      if (!words) { $('#padText', host).focus(); return toast(tool === 'x' ? 'Type the words first, then click the pad.' : 'Type values like 2 7 11 15, then click the pad.'); }
+      strokes.push(tool === 'x' ? { t: 'x', c: ink, x, y, s: words } : { t: 'c', c: ink, x, y, v: words.split(/\s+/) });
+      draw(); persist();
+    }
+  };
+  cv.onpointermove = e => {
+    if (!live) return;
+    const [x, y] = at(e);
+    if (live.t === 'p') live.pts.push([x, y]);
+    if (live.t === 'b') { live.w = x - live.x; live.h = y - live.y; }
+    if (live.t === 'a') { live.x2 = x; live.y2 = y; }
+    if (live.t === 'e') strokes = strokes.filter(s => !near(s, x, y));
+    draw();
+  };
+  cv.onpointerup = cv.onpointercancel = () => {
+    if (!live) return;
+    if (live.t !== 'e') strokes.push(live);
+    live = null; draw(); persist();
+  };
+  host.onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.tool) { tool = b.dataset.tool; $$('[data-tool]', host).forEach(x => x.setAttribute('aria-pressed', x === b)); }
+    if (b.dataset.ink) { ink = b.dataset.ink; $$('[data-ink]', host).forEach(x => x.setAttribute('aria-pressed', x === b)); }
+    if (b.dataset.do === 'undo') { strokes.pop(); draw(); persist(); }
+    if (b.dataset.do === 'clear' && strokes.length && confirm('Clear this sketch?')) { strokes = []; draw(); persist(); }
+  };
+  new ResizeObserver(() => { scale = fit(cv); draw(); }).observe(cv);
+}
+
+// ---------- editor ----------
+function editor(ta, onRun) {
+  if (!window.CodeMirror) return { getValue: () => ta.value, setValue: v => { ta.value = v; } };
+  const cm = CodeMirror.fromTextArea(ta, {
+    mode: 'python', theme: 'pad', lineNumbers: true, indentUnit: 4, tabSize: 4, indentWithTabs: false, matchBrackets: true,
+    autoCloseBrackets: true, styleActiveLine: true, viewportMargin: Infinity,
+    extraKeys: { Tab: c => c.somethingSelected() ? c.indentSelection('add') : c.replaceSelection('    '), 'Shift-Tab': 'indentLess', 'Ctrl-Enter': () => onRun(), 'Cmd-Enter': () => onRun(), Esc: c => c.getInputField().blur() }
+  });
+  return cm;
+}
+function colour(root) {
+  if (!window.CodeMirror || !CodeMirror.runMode) return;
+  $$('pre code:not([data-hl])', root).forEach(el => { el.dataset.hl = 1; CodeMirror.runMode(el.textContent, 'python', el); el.parentElement.classList.add('cm-s-pad'); });
+}
+
+// ---------- lesson blocks ----------
+function blocks(list) {
+  return list.map((b, i) => {
+    if (typeof b === 'string') return b;
+    if (b.fig !== undefined) return `<figure class="vis" style="margin:16px 0"><svg viewBox="0 0 720 ${b.h}" role="img" aria-label="${esc(b.cap || 'Diagram')}">${b.fig}</svg>${b.cap ? `<figcaption class="cap">${b.cap}</figcaption>` : ''}</figure>`;
+    if (b.steps) {
+      return `<div class="vis" data-steps="${i}"><svg viewBox="0 0 720 ${b.h}" role="img" aria-label="Step-by-step diagram; the note below describes each step"></svg><div class="note" aria-live="polite"></div>
+        <div class="ctrl"><button class="btn" data-step="-1">Back</button><button class="btn go" data-step="1">Next step</button><button class="btn quiet" data-step="0">Restart</button><span class="count"></span></div></div>`;
+    }
+    if (b.think) return `<details class="think"><summary>${b.think}</summary><div>${b.ans}</div></details>`;
+    if (b.run !== undefined) return `<div class="tryit" data-run="${i}"><textarea>${esc(b.run)}</textarea><div class="row" style="margin-top:6px"><button class="btn" data-tryrun>Run this</button><span class="small mute" data-status></span></div><div class="log" hidden></div></div>`;
+    return '';
   }).join('');
-  const renderHints = () => { $('#hints').innerHTML = hintsHTML(); };
-  handlers.hint = () => { st.hintsOpen = (st.hintsOpen || 0) + 1; save(); renderHints(); };
-  handlers.hintEarly = () => { if (confirm('Give it one more honest minute first? OK = reveal anyway.')) { st.hintsEarly++; handlers.hint(); } };
-  renderHints();
-
-  const paint = () => {
-    $('#clock').textContent = fmt(st.secs);
-    const frac = st.secs / (p.time * 60);
-    $('#tbar').className = 'bar ' + (frac > 1 ? 'red' : frac > 0.75 ? 'amber' : '');
-    $('#tbar i').style.width = Math.min(100, frac * 100) + '%';
-  };
-  const tick = () => {
-    if (document.hidden) return;
-    st.secs++;
-    paint();
-    if (hintAt.includes(st.secs)) renderHints();
-    if (st.secs === p.time * 60 && st.stage < 3) { // time-box over: unlock review without disturbing the editor
-      unlock(3);
-      const t = document.querySelectorAll('.tab')[3]; t.classList.remove('locked');
-      $('#clock').title = 'Time-box over. The Review tab is unlocked. Finish your attempt or study the solution.';
-    }
-    if (st.secs % 5 === 0) save();
-  };
-  paint();
-  if (!st.solved) every(1000, tick);
-
-  function unlock(n) { st.stage = Math.max(st.stage, n); save(); }
-  stageKeys = e => { if (e.altKey && e.key >= '1' && e.key <= '4') { e.preventDefault(); handlers.stage({ dataset: { i: +e.key - 1 } }); } };
-  handlers.stage = el => { const i = +el.dataset.i; if (i <= st.stage) { st.view = i; save(); route(); } };
-  const go = i => { st.view = i; save(); route(); };
-
-  function renderStage() {
-    const box = $('#stage');
-    if (st.view === 0) {
-      const done = p.logic.every((_, i) => st.logic[i] !== undefined);
-      const shown = p.logic.findIndex((_, i) => st.logic[i] === undefined);
-      const upto = shown === -1 ? p.logic.length : shown + 1;
-      box.innerHTML = `<h3 style="margin-top:0">Build the logic</h3><p class="small mute">Answer each step before the next one appears. Wrong answers are fine. Read the explanation, because that's where the learning happens.</p>
-        ${p.logic.slice(0, upto).map((q, i) => mcqHTML(`lg-${id}-${i}`, q, st.logic[i])).join('')}
-        ${done ? `<h3>Your plan in plain words</h3><textarea class="plain" id="plan" placeholder="e.g. Walk once; keep map of value→index; for each x check target−x ...">${esc(st.plan || '')}</textarea>
-        <div class="row" style="margin-top:10px"><button class="btn primary" data-act="toFill">Continue → fill the gaps</button></div>` :
-        `<div class="row" style="margin-top:10px"><button class="btn ghost small" data-act="challenge">I already know this, skip to writing code (challenge mode)</button></div>`}`;
-      p.logic.forEach((q, i) => { mcqAnswer[`lg-${id}-${i}`] = c => { st.logic[i] = c; save(); renderStage(); }; });
-      const pl = $('#plan'); if (pl) pl.oninput = () => { st.plan = pl.value; save(); };
-      handlers.toFill = () => { unlock(1); go(1); };
-      handlers.challenge = () => { st.challenge = true; unlock(2); go(2); };
-    } else if (st.view === 1) {
-      const parts = p.sol[lang].split(/⟦([^⟧]*)⟧/);
-      const fb = st.blanks[lang] = st.blanks[lang] || { vals: {}, state: {}, checks: 0 };
-      let html = '', k = 0;
-      parts.forEach((part, i) => {
-        if (i % 2 === 0) { html += esc(part); return; }
-        const ans = part.split('¦')[0];
-        const s = fb.state[k];
-        html += `<input data-k="${k}" class="${s === true ? 'right' : s === false ? 'wrong' : ''}" style="width:${Math.max(4, ans.length + 2)}ch" value="${esc(s === 'rev' ? ans : fb.vals[k] || '')}" ${s === true || s === 'rev' ? 'readonly' : ''} spellcheck="false" autocomplete="off">`;
-        k++;
-      });
-      const total = k;
-      const allDone = Object.values(fb.state).filter(v => v === true || v === 'rev').length === total;
-      if (allDone && !fb.done) { fb.done = true; save(); }
-      box.innerHTML = `<h3 style="margin-top:0">Fill the gaps (${LANG_NAME[lang]})</h3>
-        <p class="small mute">Type the missing code. Spacing doesn't matter. Use your plan from step 1. Tab moves to the next blank, Enter checks.</p>
-        <div class="fill">${html}</div>
-        <div class="row" style="margin-top:10px">
-          <button class="btn primary" data-act="checkFill">Check</button>
-          ${fb.checks >= 2 && !allDone ? '<button class="btn" data-act="revealFill">Reveal the wrong ones</button>' : ''}
-          ${allDone ? '<span class="ok">All gaps filled ✓</span><button class="btn primary" data-act="toWrite">Continue → write it from scratch</button>' : ''}
-        </div>`;
-      box.querySelectorAll('.fill input').forEach(inp => {
-        inp.oninput = () => { fb.vals[inp.dataset.k] = inp.value; save(); };
-        inp.onkeydown = e => { if (e.key === 'Enter') handlers.checkFill(); };
-      });
-      const norm = s => s.replace(/\s+/g, '').replace(/"/g, "'").replace(/;$/, '');
-      const answers = parts.filter((_, i) => i % 2).map(a => a.split('¦'));
-      handlers.checkFill = () => {
-        answers.forEach((alts, i) => { if (fb.state[i] !== 'rev') fb.state[i] = alts.some(a => norm(a) === norm(fb.vals[i] || '')); });
-        fb.checks++; save(); renderStage();
-        const first = box.querySelector('.fill input.wrong'); if (first) first.focus();
-      };
-      handlers.revealFill = () => { answers.forEach((_, i) => { if (fb.state[i] !== true) fb.state[i] = 'rev'; }); fb.revealedCount = (fb.revealedCount || 0) + 1; save(); renderStage(); };
-      handlers.toWrite = () => { unlock(2); go(2); };
-    } else if (st.view === 2) {
-      const code = st.code[lang] !== undefined ? st.code[lang] : starter(p, lang);
-      box.innerHTML = `<div class="spread"><h3 style="margin:0">Write the whole solution (${LANG_NAME[lang]})</h3><span class="small mute"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> run · <kbd>Alt</kbd>+<kbd>1-4</kbd> stages · print()/console.log works</span></div>
-        <p class="small mute">${st.challenge ? 'Challenge mode: solve it cold.' : 'Write it from memory without looking back. Rebuilding it yourself is what makes it stick for Monday.'} Say the complexity out loud before running.</p>
-        <textarea class="code" id="ed" spellcheck="false">${esc(code)}</textarea>
-        <div class="row" style="margin-top:10px">
-          <button class="btn primary" data-act="run">▶ Run tests</button>
-          <button class="btn ghost" data-act="resetCode">Reset editor</button>
-          ${st.stage < 3 && !st.solved ? `<button class="btn ghost" data-act="giveUp">Show solution (counts as peeking)</button>` : ''}
-          <span id="status" class="small mute"></span>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <input type="text" id="custom" style="flex:1;font-family:var(--mono);font-size:13px" placeholder="Custom input as a JSON list of arguments, e.g. ${esc(JSON.stringify(p.tests[0][0]))}" spellcheck="false">
-          <button class="btn" data-act="runCustom">Run custom input</button>
-        </div>
-        <div class="results" id="res"></div>`;
-      const ed = $('#ed');
-      ed.oninput = () => { st.code[lang] = ed.value; save(); };
-      codeEditor(ed, lang, () => handlers.run());
-      if (lang === 'py') Runner.warmPython();
-      handlers.run = async () => {
-        $('#status').textContent = 'Running…';
-        const r = await Runner.run(lang, ed.value, p.fn[lang], p.tests, p.io, msg => { $('#status').textContent = msg; });
-        $('#status').textContent = '';
-        $('#res').innerHTML = resultsHTML(p, p.tests, r);
-        st.runs = (st.runs || 0) + 1;
-        const allPass = r.results && r.results.every((x, i) => !x.error && checkResult(x.out, p.tests[i][1], p.compare));
-        if (allPass) {
-          if ((!st.solved && !st.revealed) || st.redo) st.solvedClean = true; // a clean redo clears the revisit flag
-          if (st.redo) { st.redo = false; if (st.conf === 0) delete st.conf; }
-          if (!st.solved) toast(`🎉 <b>${esc(p.title)}</b> solved in ${fmt(st.secs)}${st.secs <= p.time * 60 ? ', within the time-box' : ''}`, 'ok');
-          st.solved = true; unlock(3); updateHeader();
-          const peek = box.querySelector('[data-act=giveUp]'); if (peek) peek.remove();
-          $('#res').insertAdjacentHTML('afterbegin', `<div class="card" style="border-color:var(--green)"><b class="ok">Solved in ${fmt(st.secs)}.</b> State the time & space complexity to yourself, then <a href="javascript:void 0" data-act="toReview">open the review →</a></div>`);
-        }
-        save();
-      };
-      handlers.toReview = () => go(3);
-      handlers.runCustom = async () => {
-        let args;
-        try { args = JSON.parse($('#custom').value); if (!Array.isArray(args) || args.length !== p.params.length) throw 0; }
-        catch { $('#res').innerHTML = `<div class="t fail">Enter a JSON list with ${p.params.length} argument(s) in order: ${esc(p.params.join(', '))}. Example: ${esc(JSON.stringify(p.tests[0][0]))}</div>`; return; }
-        $('#status').textContent = 'Running…';
-        const r = await Runner.run(lang, ed.value, p.fn[lang], [[args, null]], p.io, msg => { $('#status').textContent = msg; });
-        $('#status').textContent = '';
-        const x = r.results && r.results[0];
-        $('#res').innerHTML = r.compileError ? resultsHTML(p, [], r) : `<div class="t">${esc(argsLabel(p, args))}<div>output: <b>${esc(x.error || x.out)}</b></div>${x.log ? `<div class="log">stdout: ${esc(x.log)}</div>` : ''}</div>`;
-      };
-      handlers.resetCode = () => { if (confirm('Clear your code?')) { delete st.code[lang]; save(); renderStage(); } };
-      handlers.giveUp = () => {
-        if (!st.runs && !confirm("You haven't run any code yet. Try at least a brute force first? OK = show solution anyway.")) return;
-        unlock(3); go(3);
-      };
-    } else {
-      const clean = p.sol[lang].replace(/⟦([^⟧]*)⟧/g, (_, a) => a.split('¦')[0]);
-      const other = lang === 'py' ? 'js' : 'py';
-      if (!st.solved && !st.revealed) { st.revealed = true; save(); }
-      if (st.redo) { st.redo = false; save(); } // looked at the solution mid-redo
-      const cq = complexityQuiz(p);
-      if (cq && st.cq === undefined) {
-        box.innerHTML = `<h3 style="margin-top:0">Before the solution: complexity check</h3><p class="small mute">Leapfrog interviewers reportedly care about this. Answer for the optimal approach.</p>${mcqHTML('cq-' + id, cq, undefined)}`;
-        mcqAnswer['cq-' + id] = c => { st.cq = c; save(); renderStage(); };
-        return;
-      }
-      box.innerHTML = `<h3 style="margin-top:0">Review</h3>
-        ${cq ? mcqHTML('cq-' + id, cq, st.cq) : ''}
-        ${st.solved ? '' : '<div class="callout">You peeked, which is fine. Read the solution and the why, then go back to <b>Write it</b> and re-type it <b>from memory</b> until all tests pass. It goes on your revisit list.</div>'}
-        <p><b>Complexity:</b> ${esc(p.complexity)}</p>
-        <p><b>Takeaway:</b> ${esc(p.takeaway)}</p>
-        <pre><code data-lang="${lang}">${esc(clean)}</code></pre>
-        <details><summary class="small mute">Same solution in ${LANG_NAME[other]}</summary><pre><code data-lang="${other}">${esc(p.sol[other].replace(/⟦([^⟧]*)⟧/g, (_, a) => a.split('¦')[0]))}</code></pre></details>
-        ${st.plan ? `<p class="small mute"><b>Your plan was:</b> ${esc(st.plan)}</p>` : ''}
-        <h3>How confident are you to write this cold on Monday?</h3>
-        <div class="row">${['😬 Need to redo', '🙂 Mostly', '💪 Nailed it'].map((t, i) => `<button class="btn ${st.conf === i ? 'primary' : ''}" data-act="conf" data-i="${i}">${t}</button>`).join('')}</div>
-        <div class="row" style="margin-top:14px"><button class="btn" data-act="redo">↺ Redo from a blank editor</button>${nextLink(id)}</div>`;
-      handlers.redo = () => { delete st.code[lang]; st.redo = true; save(); go(2); };
-      handlers.conf = el => { st.conf = +el.dataset.i; save(); renderStage(); };
-    }
-  }
-  renderStage();
 }
-
-function prevNext(id) {
-  const order = planOrder(), i = order.indexOf(id);
-  const prev = order[i - 1], next = order[i + 1];
-  return `<a href="#/problems">← all problems</a>${prev ? `<span class="mute">·</span><a href="#/p/${prev}">‹ ${esc(P[prev].title)}</a>` : ''}${next ? `<span class="mute">·</span><a href="#/p/${next}">${esc(P[next].title)} ›</a>` : ''}`;
-}
-const BIG_O = ['O(1)', 'O(log n)', 'O(n)', 'O(n log n)', 'O(n²)', 'O(n³)', 'O(2ⁿ)', 'O(n · 2ⁿ)'];
-function complexityQuiz(p) {
-  const m = p.complexity.match(/O\((?:[^()]|\([^()]*\))*\)/);
-  if (!m) return null;
-  const hash = str => [...str].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7);
-  const wrong = BIG_O.filter(o => o.replace(/\s/g, '') !== m[0].replace(/\s/g, '')).sort((a, b) => hash(p.id + a) - hash(p.id + b)).slice(0, 3);
-  const opts = [m[0], ...wrong].sort((a, b) => hash(p.id + b) - hash(p.id + a));
-  return { q: 'Time complexity of the optimal solution?', opts, a: opts.indexOf(m[0]), why: `${p.complexity}. ${p.takeaway}` };
-}
-
-function nextLink(id) {
-  const order = planOrder();
-  const nxt = order.slice(order.indexOf(id) + 1).find(x => !(S.p[x] && S.p[x].solved));
-  return nxt ? `<a class="btn primary" href="#/p/${nxt}">Next: ${esc(P[nxt].title)} →</a>` : '<a class="btn" href="#/">Back to plan</a>';
-}
-
-// ---------- MCQ ----------
-function viewMCQ(cat) {
-  if (!cat) {
-    app.innerHTML = `<h1>MCQ practice</h1><p class="mute">The exam has <b>3 MCQs</b>. Candidates reported design patterns, networking and basic DSA/complexity. Aim for under 90 seconds per question.</p>
-    <div class="grid">
-      <a class="card" href="#/mcq/all" style="color:inherit;text-decoration:none"><b>🎲 Mixed, all categories</b><div class="small mute">${MCQS.length} questions</div></a>
-      <a class="card" href="#/mcq/missed" style="color:inherit;text-decoration:none"><b>🔁 Ones I got wrong</b><div class="small mute">${MCQS.filter(q => S.mcq[q.id] === false).length} questions</div></a>
-      ${Object.entries(MCQ_CATS).map(([c, n]) => {
-        const qs = MCQS.filter(q => q.cat === c), r = qs.filter(q => S.mcq[q.id] === true).length;
-        return `<a class="card" href="#/mcq/${c}" style="color:inherit;text-decoration:none"><b>${esc(n)}</b><div class="small mute">${r}/${qs.length} correct</div><div class="bar" style="margin-top:6px"><i style="width:${r / qs.length * 100}%"></i></div></a>`;
-      }).join('')}
-    </div>`;
-    return;
-  }
-  const pool = cat === 'all' ? MCQS : cat === 'missed' ? MCQS.filter(q => S.mcq[q.id] === false) : MCQS.filter(q => q.cat === cat);
-  if (!pool.length) { app.innerHTML = `<a href="#/mcq">← back</a><p>Nothing here yet.</p>`; return; }
-  // unanswered first, then wrong ones, then shuffled rest
-  const order = [...pool].sort(() => Math.random() - 0.5).sort((a, b) => rank(a) - rank(b));
-  function rank(q) { return S.mcq[q.id] === undefined ? 0 : S.mcq[q.id] === false ? 1 : 2; }
-  let i = 0, right = 0, done = 0;
-  const show = (chosen) => {
-    const q = order[i];
-    app.innerHTML = `<a href="#/mcq" class="small">← categories</a>
-      <div class="spread"><h1>${esc(MCQ_CATS[cat] || (cat === 'all' ? 'Mixed' : 'Missed questions'))}</h1><span class="mute">${i + 1} / ${order.length} · session ${right}/${done}</span></div>
-      <div class="card"><span class="pill">${esc(MCQ_CATS[q.cat])}</span>${mcqHTML('m', q, chosen)}
-      ${chosen !== undefined ? `<div class="row" style="margin-top:10px">${i + 1 < order.length ? '<button class="btn primary" data-act="nextQ">Next →</button>' : `<b>Done: ${right}/${done} this session.</b> <a class="btn" href="#/mcq">Back</a>`}</div>` : ''}</div>`;
-    mcqAnswer.m = c => { S.mcq[q.id] = c === q.a; done++; if (c === q.a) right++; save(); show(c); };
-  };
-  handlers.nextQ = () => { i++; show(); };
-  show();
-}
-
-// ---------- Mock exam ----------
-const MOCK_SECS = 60 * 60;
-function pickMock(hard) {
-  const shuffle = a => [...a].sort(() => Math.random() - 0.5);
-  const unsolvedFirst = list => shuffle(list).sort((a, b) => (S.p[a.id] && S.p[a.id].solvedClean ? 1 : 0) - (S.p[b.id] && S.p[b.id].solvedClean ? 1 : 0));
-  const used = new Set(S.mocks.flatMap(m => m.probs));
-  const fresh = list => { const f = list.filter(p => !used.has(p.id)); return f.length ? f : list; };
-  const p1 = unsolvedFirst(fresh(PROBLEMS.filter(p => p.diff === (hard ? 'Medium' : 'Easy'))))[0];
-  const p2 = unsolvedFirst(fresh(PROBLEMS.filter(p => p.diff === (hard ? 'Hard' : 'Medium') && p.pattern !== p1.pattern)))[0];
-  const cats = shuffle(['complexity', 'dsa', 'oop', 'design', 'network', 'db', 'web', 'output']).slice(0, 3);
-  return { start: Date.now(), lang: S.lang, mcqs: cats.map(c => shuffle(MCQS.filter(q => q.cat === c))[0].id), probs: [p1.id, p2.id], ans: {}, code: {} };
-}
-
-function viewMock() {
-  const m = S.mock;
-  if (!m) {
-    app.innerHTML = `<h1>Mock exam</h1>
-    <div class="card"><p>Same format as Monday: <b>3 MCQs + 2 problems in 60 minutes</b>, no hints, no solutions. Problem 1 is easy and problem 2 is medium (the reported Leapfrog mix). Problems you haven't solved cleanly are preferred. While working, "Run samples" runs the first 2 tests only; your submission is graded on all tests, like hidden test cases.</p>
-    <p class="small mute">Language: <b>${LANG_NAME[S.lang]}</b> (change at top right before starting). Put your phone away and do it in one sitting.</p>
-    <div class="row"><button class="btn primary" data-act="startMock">Start 60-minute mock (Easy + Medium)</button>
-    <button class="btn" data-act="startMock" data-hard="1">Hard mode (Medium + Hard)</button></div></div>
-    ${S.mocks.length ? `<div class="card"><h3 style="margin-top:0">History</h3><table><tr><th>When</th><th>MCQ</th><th>Problem 1</th><th>Problem 2</th><th>Time</th><th>Score</th></tr>${S.mocks.map(r => `<tr><td class="small">${new Date(r.at).toLocaleString()}</td><td>${r.mcq}/3</td><td class="small"><a href="#/p/${r.probs[0]}">${esc(P[r.probs[0]].title)}</a> ${r.tests[0]}</td><td class="small"><a href="#/p/${r.probs[1]}">${esc(P[r.probs[1]].title)}</a> ${r.tests[1]}</td><td>${fmt(r.secs)}</td><td><b>${r.score}%</b></td></tr>`).join('')}</table></div>` : ''}`;
-    handlers.startMock = el => { S.mock = pickMock(!!el.dataset.hard); save(); route(); };
-    return;
-  }
-  const lang = m.lang;
-  if (lang === 'py') Runner.warmPython();
-  app.innerHTML = `
-    <div class="mockbar spread"><span>Mock exam · ${LANG_NAME[lang]}</span><span class="mockclock" id="mclock"></span><button class="btn primary" data-act="submitMock">Submit</button></div>
-    <div class="card"><h3 style="margin-top:0">Part A · MCQs</h3>${m.mcqs.map((qid, i) => {
-      const q = MCQS.find(x => x.id === qid);
-      return `<div class="q"><div style="white-space:pre-wrap"><b>${i + 1}. ${esc(q.q)}</b></div>${q.code ? `<pre><code>${esc(q.code)}</code></pre>` : ''}
-        ${q.opts.map((o, j) => `<button class="opt" style="${m.ans[qid] === j ? 'border-color:var(--blue);background:#14263a' : ''}" data-act="mockAns" data-q="${qid}" data-j="${j}">${String.fromCharCode(65 + j)}. ${esc(o)}</button>`).join('')}</div>`;
-    }).join('')}</div>
-    ${m.probs.map((pid, n) => {
-      const p = P[pid];
-      return `<div class="card"><h3 style="margin-top:0">Part B · Problem ${n + 1}: ${esc(p.title)}</h3>${p.desc}
-        ${p.examples.map(e => `<div class="ex"><div><span class="mute">Input:</span> ${esc(e.in)}</div><div><span class="mute">Output:</span> ${esc(e.out)}</div></div>`).join('')}
-        <div class="small mute">Constraints: ${p.constraints.map(esc).join(' · ')}</div>
-        <textarea class="code" id="med${n}" spellcheck="false" style="min-height:300px">${esc(m.code[pid] !== undefined ? m.code[pid] : starter(p, lang))}</textarea>
-        <div class="row" style="margin-top:8px"><button class="btn" data-act="mockRun" data-n="${n}">▶ Run samples</button><span id="mst${n}" class="small mute"></span></div>
-        <div class="results" id="mres${n}"></div></div>`;
-    }).join('')}`;
-  m.probs.forEach((pid, n) => {
-    const ed = $('#med' + n);
-    ed.oninput = () => { m.code[pid] = ed.value; save(); };
-    codeEditor(ed, lang, () => handlers.mockRun({ dataset: { n } }));
+function wireBlocks(root, list) {
+  $$('[data-steps]', root).forEach(el => {
+    const b = list[+el.dataset.steps], max = b.steps.length - 1;
+    let i = 0;
+    const show = () => {
+      $('svg', el).innerHTML = b.steps[i].d; $('.note', el).innerHTML = b.steps[i].n;
+      $('.count', el).textContent = `Step ${i + 1} of ${max + 1}`;
+      $('[data-step="-1"]', el).disabled = i === 0; $('[data-step="1"]', el).disabled = i === max;
+    };
+    el.addEventListener('click', e => { const s = e.target.closest('[data-step]'); if (!s) return; i = +s.dataset.step === 0 ? 0 : Math.max(0, Math.min(max, i + +s.dataset.step)); show(); });
+    show();
   });
-  handlers.mockAns = el => { m.ans[el.dataset.q] = +el.dataset.j; save(); el.parentElement.querySelectorAll('.opt').forEach((b, j) => { b.style.cssText = j === +el.dataset.j ? 'border-color:var(--blue);background:#14263a' : ''; }); };
-  handlers.mockRun = async el => {
-    const n = +el.dataset.n, p = P[m.probs[n]], tests = p.tests.slice(0, 2);
-    $('#mst' + n).textContent = 'Running…';
-    const r = await Runner.run(lang, $('#med' + n).value, p.fn[lang], tests, p.io, s => { $('#mst' + n).textContent = s; });
-    $('#mst' + n).textContent = '';
-    $('#mres' + n).innerHTML = resultsHTML(p, tests, r);
-  };
-  let submitting = false;
-  handlers.submitMock = async (el, ev, auto) => {
-    if (submitting || (!auto && !confirm('Submit the mock exam now?'))) return;
-    submitting = true;
-    app.innerHTML = '<div class="card">Grading on all test cases…</div>';
-    const secs = Math.min(MOCK_SECS, Math.round((Date.now() - m.start) / 1000));
-    const mcq = m.mcqs.filter(q => m.ans[q] === MCQS.find(x => x.id === q).a).length;
-    const tests = [], fracs = [];
-    for (const pid of m.probs) {
-      const p = P[pid];
-      const r = await Runner.run(lang, m.code[pid] || '', p.fn[lang], p.tests, p.io);
-      const pass = r.results ? r.results.filter((x, i) => !x.error && checkResult(x.out, p.tests[i][1], p.compare)).length : 0;
-      tests.push(`${pass}/${p.tests.length}`); fracs.push(pass / p.tests.length);
+  $$('[data-run]', root).forEach(el => {
+    const cm = editor($('textarea', el), () => go());
+    const go = async () => {
+      const out = $('.log', el), st = $('[data-status]', el);
+      const r = await Engine.run(cm.getValue(), [], m => { st.textContent = m; });
+      st.textContent = ''; out.hidden = false;
+      out.textContent = (r.stdout || '') + (r.compileError ? (r.stdout ? '\n' : '') + r.compileError : '') || '(nothing printed)';
+    };
+    $('[data-tryrun]', el).onclick = go;
+  });
+  colour(root);
+}
+
+// ---------- header ----------
+function head() {
+  const u = current(), dt = new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  $('#padHead').innerHTML = `<a class="brand" href="#/">cracked</a>
+    <div class="fields">
+      <div class="field"><span class="k">Subject</span><span class="v">${esc(u ? u.title : 'All sheets done')}</span></div>
+      <div class="field"><span class="k">Date</span><span class="v">${dt}</span></div>
+      <div class="field"><span class="k">Sheet</span><span class="v">${sheetsDone()} of ${SHEETS()}</span></div>
+      <div class="field"><span class="k">Streak</span><span class="v">${streak()} day${streak() === 1 ? '' : 's'}</span></div>
+      <div class="field" title="${esc(nextRank())}"><span class="k">Rank · ${S.xp} XP</span><span class="v">${esc(rank())}</span></div>
+    </div>
+    <nav class="pad-nav" aria-label="Main">
+      <a href="#/">Today</a><a href="#/path">Path</a><a href="#/rough">Rough</a><a href="#/gauntlet">Gauntlet</a><a href="#/notebook">Notebook</a><a href="#/settings">Settings</a>
+    </nav>`;
+}
+
+// ---------- today ----------
+const PACE = { slow: { read: 1, solve: 2, label: 'Slow: 1 concept, 2 problems a day' }, steady: { read: 1, solve: 3, label: 'Steady: 1 concept, 3 problems a day' }, sprint: { read: 2, solve: 6, label: 'Sprint: 2 concepts, 6 problems a day' } };
+const due = () => Object.keys(S.p).filter(id => P[id] && S.p[id].due && S.p[id].due <= day() && (S.p[id].solved || S.p[id].retry)).sort((a, b) => S.p[a].due < S.p[b].due ? -1 : 1);
+function gauntletPick() {
+  const log = dayLog();
+  if (log.g && P[log.g]) return log.g;
+  const pool = UNITS.filter(u => !u.project && S.lessons[u.id] && u.phase >= 1).flatMap(u => [...u.extra, ...u.core]);
+  if (pool.length < 5) return null;
+  const fresh = pool.filter(id => !solved(id));
+  const from = fresh.length ? fresh : pool;
+  log.g = from[Math.floor(Math.random() * from.length)]; save();
+  return log.g;
+}
+function plan() {
+  const log = dayLog(), pace = PACE[S.pace] || PACE.steady, items = [];
+  due().slice(0, 2).forEach(id => items.push({ kind: 'Rematch', what: P[id].title, href: `#/p/${id}`, key: 'p:' + id, rematch: id }));
+  let reads = log.read, slots = pace.solve + log.bonus - log.solved;
+  for (const u of UNITS) {
+    if (cleared(u)) continue;
+    if (u.project) { if (slots > 0) items.push({ kind: 'Project', what: u.title, href: `#/unit/${u.id}`, key: 'u:' + u.id }); break; }
+    if (!S.lessons[u.id]) {
+      if (reads >= pace.read) break;
+      items.push({ kind: 'Read', what: u.title, href: `#/read/${u.id}`, key: 'l:' + u.id });
+      reads++;
     }
-    // weight: MCQs 10% each, problems 35% each
-    const score = Math.round(mcq * 10 + fracs[0] * 35 + fracs[1] * 35);
-    m.mcqs.forEach(q => { S.mcq[q] = m.ans[q] === MCQS.find(x => x.id === q).a; });
-    S.mocks.push({ at: Date.now(), mcq, probs: m.probs, tests, secs, score, mcqIds: m.mcqs, ans: m.ans });
-    S.mock = null; save(); updateHeader();
-    toast(`⏱ Mock finished: <b>${score}%</b>`, score >= 50 ? 'ok' : 'bad');
-    const res = S.mocks[S.mocks.length - 1];
-    app.innerHTML = `<h1>Mock result: ${score}%</h1>
-      <div class="card"><p>MCQ: <b>${mcq}/3</b> · Problem 1: <b>${tests[0]}</b> · Problem 2: <b>${tests[1]}</b> · Time used: <b>${fmt(secs)}</b></p>
-      <p class="small mute">${score >= 80 ? 'Exam-ready on this set. Keep the rhythm.' : score >= 50 ? 'Close. Redo any problem below that is not 100% using the guided flow, then try another mock.' : 'No panic. Go through both problems with the guided flow (Think → Fill → Write), then retake a mock later.'}</p></div>
-      <div class="card"><h3 style="margin-top:0">MCQ review</h3>${res.mcqIds.map(q => mcqHTML('r' + q, MCQS.find(x => x.id === q), res.ans[q] === undefined ? -1 : res.ans[q])).join('')}</div>
-      <div class="row">${m.probs.map(pid => `<a class="btn" href="#/p/${pid}">Study ${esc(P[pid].title)}</a>`).join('')}<a class="btn primary" href="#/mock">Back to mocks</a></div>`;
-  };
-  const clock = () => {
-    const left = MOCK_SECS - (Date.now() - m.start) / 1000;
-    const c = $('#mclock'); if (!c) return;
-    c.textContent = fmt(Math.max(0, left));
-    c.style.color = left < 300 ? 'var(--red)' : left < 900 ? 'var(--amber)' : '';
-    if (left <= 0) handlers.submitMock(null, null, true);
-  };
-  clock(); every(1000, clock);
-}
-
-// ---------- Syntax sheet ----------
-const SYNTAX = [
-  ['Hashmap', 'd = {}\nd[k] = d.get(k, 0) + 1\nif k in d: ...\nfor k, v in d.items(): ...\nfrom collections import Counter, defaultdict\nc = Counter(s); c.most_common(2)\ng = defaultdict(list)', 'const m = new Map();\nm.set(k, (m.get(k) || 0) + 1);\nif (m.has(k)) {}\nfor (const [k, v] of m) {}\n// sort entries by value desc\n[...m].sort((a, b) => b[1] - a[1]);'],
-  ['Set', 's = set(); s.add(x); s.remove(x)\nx in s\na & b, a | b, a - b', 'const s = new Set(); s.add(x); s.delete(x);\ns.has(x); s.size\nnew Set(arr)  // dedupe'],
-  ['Arrays', 'a = [0] * n\ngrid = [[0] * c for _ in range(r)]\na.append(x); a.pop(); a[-1]\na[i:j]; a[::-1]\nsum(a), max(a), min(a)\nfor i, x in enumerate(a): ...\nlist(zip(a, b))', 'const a = new Array(n).fill(0);\nconst g = Array.from({length: r}, () => new Array(c).fill(0));\na.push(x); a.pop(); a[a.length - 1]; a.at(-1)\na.slice(i, j); [...a].reverse()\nMath.max(...a)  // small arrays only\na.reduce((s, x) => s + x, 0)\na.forEach((x, i) => {})'],
-  ['Sorting', 'a.sort()                      # in place\nb = sorted(a, reverse=True)\na.sort(key=lambda x: (x[1], -x[0]))', 'a.sort((x, y) => x - y);      // numbers!\na.sort((x, y) => y - x);      // desc\na.sort((p, q) => p[1] - q[1] || q[0] - p[0]);\nstrs.sort();  // strings ok w/o comparator'],
-  ['Strings', "s.lower(), s.upper(), s.strip()\ns.split(), ' '.join(words)\ns.isalnum(), s.isdigit(), s.isalpha()\nord('a'), chr(97)\ns.find('x')  # -1 if missing\ns.count('a'); s.startswith('ab')\nf'{x} and {y:.2f}'", "s.toLowerCase(), s.toUpperCase(), s.trim()\ns.split(' '), words.join(' ')\n/[a-z0-9]/i.test(ch)\ns.charCodeAt(0), String.fromCharCode(97)\ns.indexOf('x')  // -1 if missing\ns.includes('ab'); s.startsWith('ab')\n`${x} and ${y.toFixed(2)}`; s.repeat(3)"],
-  ['Stack / Queue', 'st = []; st.append(x); st.pop(); st[-1]\nfrom collections import deque\nq = deque(); q.append(x); q.popleft()', 'const st = []; st.push(x); st.pop(); st[st.length - 1]\n// queue: avoid shift() in hot loops\nconst q = [start]; let head = 0;\nwhile (head < q.length) { const cur = q[head++]; }'],
-  ['Heap', 'import heapq\nh = []; heapq.heappush(h, x); heapq.heappop(h)\nh[0]  # min\nheapq.heappush(h, -x)  # max-heap trick\nheapq.nlargest(k, nums)', '// No built-in heap in JS.\n// For top-k on exam: sort (n log n) is usually acceptable.\nnums.sort((a, b) => b - a).slice(0, k);'],
-  ['Integer math', '7 // 2 == 3; -7 // 2 == -4 (floor!)\nint(-7 / 2) == -3 (truncate)\n7 % 3; abs(x); pow(2, 10); 2 ** 10\nfloat(\'inf\'); math.isqrt(n)', 'Math.floor(7 / 2) // 3\nMath.trunc(-7 / 2) // -3\n7 % 3; Math.abs(x); 2 ** 10\nInfinity; Number.MAX_SAFE_INTEGER\nparseInt("42"), Number("42")'],
-  ['Loops', 'for i in range(n): ...\nfor i in range(n - 1, -1, -1): ...\nwhile l < r: ...\nfor a, b in zip(x, y): ...', 'for (let i = 0; i < n; i++) {}\nfor (let i = n - 1; i >= 0; i--) {}\nfor (const x of arr) {}     // values\nfor (const k in obj) {}     // keys (objects only)'],
-  ['Recursion / memo', 'from functools import lru_cache\n@lru_cache(maxsize=None)\ndef f(i): ...\nimport sys; sys.setrecursionlimit(10**6)', 'const memo = new Map();\nfunction f(i) {\n  if (memo.has(i)) return memo.get(i);\n  const r = /* ... */;\n  memo.set(i, r); return r;\n}'],
-  ['Classes (OOP)', 'class Animal:\n    def __init__(self, name):\n        self.name = name\n    def speak(self):\n        raise NotImplementedError\nclass Dog(Animal):\n    def speak(self):\n        return f"{self.name}: woof"', 'class Animal {\n  #secret = 1;               // private field\n  constructor(name) { this.name = name; }\n  speak() { throw new Error("abstract"); }\n}\nclass Dog extends Animal {\n  speak() { return `${this.name}: woof`; }\n}'],
-  ['Read stdin', 'import sys\ndata = sys.stdin.read().split()\nn = int(data[0])\nline = input().strip()', "const lines = require('fs').readFileSync(0, 'utf8').split('\\n');\nconst n = Number(lines[0]);\nconst nums = lines[1].split(' ').map(Number);"]
-];
-function viewSyntax() {
-  app.innerHTML = `<h1>Syntax sheet: Python ⇄ JavaScript</h1><p class="mute">Exam-morning review. Losing time on syntax in a 60-minute exam is the worst way to lose marks.</p>
-  <div class="card"><table><tr><th style="width:140px"></th><th>Python</th><th>JavaScript</th></tr>${SYNTAX.map(([t, py, js]) => `<tr><td><b>${t}</b></td><td><pre><code data-lang="py">${esc(py)}</code></pre></td><td><pre><code data-lang="js">${esc(js)}</code></pre></td></tr>`).join('')}</table></div>
-  <div class="card"><h3 style="margin-top:0">Takeaways from problems you've solved</h3><ul>${PROBLEMS.filter(p => S.p[p.id] && S.p[p.id].solved).map(p => `<li><a href="#/p/${p.id}">${esc(p.title)}</a>: ${esc(p.takeaway)} <span class="mute small">(${esc(p.complexity)})</span></li>`).join('') || '<li class="mute">Solve some problems first.</li>'}</ul></div>`;
-}
-
-// ---------- command palette ----------
-let stageKeys = null;
-function paletteItems() {
-  const items = [
-    ...PROBLEMS.map(p => ({ label: p.title, sub: `${p.diff} · ${L[p.pattern].title}${S.p[p.id] && S.p[p.id].solved ? ' · ✓ solved' : ''}`, href: '#/p/' + p.id })),
-    ...LESSONS.map(l => ({ label: l.title, sub: 'Lesson', href: '#/learn/' + l.id })),
-    ...Object.entries(MCQ_CATS).map(([c, n]) => ({ label: 'MCQ: ' + n, sub: 'Practice', href: '#/mcq/' + c })),
-    { label: 'Plan & countdown', sub: 'Page', href: '#/' }, { label: 'Mock exam', sub: 'Page', href: '#/mock' },
-    { label: 'Syntax sheet', sub: 'Page', href: '#/syntax' }, { label: 'MCQs I got wrong', sub: 'Practice', href: '#/mcq/missed' }
-  ];
-  const next = planOrder().find(id => !(S.p[id] && S.p[id].solved));
-  if (next) items.unshift({ label: 'Next up: ' + P[next].title, sub: 'Continue the plan', href: '#/p/' + next });
+    const open = required(u).filter(id => !solved(id) && !S.p[id]?.retry); // a given-up problem waits for its rematch date
+    open.slice(0, Math.max(0, slots)).forEach(id => items.push({ kind: P[id].boss ? 'Boss' : 'Solve', what: P[id].title, href: `#/p/${id}`, key: 'p:' + id }));
+    if (open.length || required(u).some(id => !solved(id))) break;
+  }
   return items;
 }
-function fuzzy(q, text) { // subsequence match; lower score = better
-  q = q.toLowerCase(); text = text.toLowerCase();
-  const direct = text.indexOf(q);
-  if (direct >= 0) return direct;
-  let i = 0, gaps = 0;
-  for (const ch of text) { if (ch === q[i]) i++; else if (i) gaps++; if (i === q.length) return 100 + gaps; }
-  return -1;
+function viewHome() {
+  const log = dayLog(), items = plan();
+  const doneList = log.done.filter(k => !items.some(i => i.key === k)).map(k => {
+    const [t, id] = [k.slice(0, 1), k.slice(2)];
+    return t === 'p' && P[id] ? [P[id].boss ? 'Boss' : 'Solve', P[id].title] : t === 'l' && U[id] ? ['Read', U[id].title] : t === 'u' && U[id] ? ['Project', U[id].title] : null;
+  }).filter(Boolean);
+  const finished = !items.length && !!doneList.length;
+  const g = gauntletPick();
+  app.innerHTML = `<div class="home">
+    <section class="today">
+      <h1>Today's sheet</h1>
+      <p class="mute">${finished ? 'Done for today. Sleep is when this sticks.' : items.length ? 'Work top to bottom. Read before you solve.' : 'Nothing is planned yet.'}</p>
+      <ul class="todo">
+        ${doneList.map(([k, w]) => `<li class="done"><a href="#/notebook"><span class="kind">${k}</span><span class="what">${esc(w)}</span></a></li>`).join('')}
+        ${items.map(i => `<li><a href="${i.href}"${i.rematch ? ` data-rematch="${i.rematch}"` : ''}><span class="kind">${i.kind}</span><span class="what">${esc(i.what)}</span></a></li>`).join('')}
+      </ul>
+      <div class="row">
+        ${items.length ? `<a class="btn go" href="${items[0].href}"${items[0].rematch ? ` data-rematch="${items[0].rematch}"` : ''}>Start: ${esc(items[0].what)}</a>` : `<button class="btn" id="oneMore">Add one more problem</button>`}
+        ${g ? `<a class="btn" href="#/gauntlet">Gauntlet</a>` : ''}
+      </div>
+      <h3>Last 12 weeks</h3>
+      <div class="heat" aria-label="Days you worked in the last 12 weeks">${Array.from({ length: 84 }, (_, i) => { const k = addDays(i - 83), xp = (S.days[k] || {}).xp || 0; return `<i class="${xp >= 150 ? 'l3' : xp >= 60 ? 'l2' : xp ? 'l1' : ''}" title="${k}: ${xp} XP"></i>`; }).join('')}</div>
+    </section>
+    <section><div class="curve-wrap">${curveSVG()}</div><p class="small mute">Each dot is one concept. <a href="#/path">See every unit</a>.</p></section>
+  </div>`;
+  const more = $('#oneMore');
+  if (more) more.onclick = () => { dayLog().bonus++; save(); viewHome(); };
 }
-function openPalette() {
-  if ($('.palette')) return;
-  const all = paletteItems();
-  const wrap = document.createElement('div');
-  wrap.className = 'palette-bg';
-  wrap.innerHTML = `<div class="palette" role="dialog" aria-label="Search"><input id="palQ" placeholder="Jump to a problem, lesson or page…" autocomplete="off" spellcheck="false"><div id="palList"></div><div class="small mute palfoot"><kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>Enter</kbd> open · <kbd>Esc</kbd> close</div></div>`;
-  document.body.appendChild(wrap);
-  let sel = 0, shown = [];
-  const draw = () => {
-    const q = $('#palQ').value.trim();
-    shown = q ? all.map(x => ({ x, s: fuzzy(q, x.label + ' ' + x.sub) })).filter(r => r.s >= 0).sort((a, b) => a.s - b.s).map(r => r.x) : all;
-    shown = shown.slice(0, 12); sel = Math.min(sel, Math.max(0, shown.length - 1));
-    $('#palList').innerHTML = shown.map((x, i) => `<a class="palitem ${i === sel ? 'sel' : ''}" href="${x.href}"><span>${esc(x.label)}</span><span class="small mute">${esc(x.sub)}</span></a>`).join('') || '<div class="mute small" style="padding:10px">No matches</div>';
-  };
-  const close = () => wrap.remove();
-  wrap.addEventListener('click', e => { if (e.target === wrap || e.target.closest('.palitem')) close(); });
-  $('#palQ').addEventListener('input', () => { sel = 0; draw(); });
-  $('#palQ').addEventListener('keydown', e => {
-    if (e.key === 'ArrowDown') { sel = (sel + 1) % shown.length; draw(); e.preventDefault(); }
-    else if (e.key === 'ArrowUp') { sel = (sel - 1 + shown.length) % shown.length; draw(); e.preventDefault(); }
-    else if (e.key === 'Enter' && shown[sel]) { location.hash = shown[sel].href; close(); }
-    else if (e.key === 'Escape') close();
-  });
-  draw(); $('#palQ').focus();
+function curveSVG() {
+  const W2 = 760, H2 = 400, n = UNITS.length, x0 = 50, y0 = 350;
+  const pt = i => { const f = i / Math.max(1, n - 1); return [x0 + f * (W2 - x0 - 26), y0 - Math.pow(f, 1.25) * (y0 - 30) - Math.sin(f * 21) * 7]; };
+  const pts = UNITS.map((_, i) => pt(i));
+  const cur = current();
+  const dividers = PHASES.map(ph => {
+    const i = UNITS.findIndex(u => u.phase === ph.id); if (i < 0) return '';
+    const X = pts[i][0] - 4;
+    const low = pts[i][1] > (y0 + 30) / 2; // the curve is low here, so the label goes up top
+    return D.line(X, y0 + 6, X, 20, 'dim-line') + `<text class="tx soft" font-size="13" text-anchor="${low ? 'end' : 'start'}" transform="translate(${X + 13} ${low ? 36 : y0 + 2}) rotate(-90)">${esc(ph.title)}</text>`;
+  }).join('');
+  return `<svg class="curve" viewBox="0 0 ${W2} ${H2}" role="img" aria-label="Your progress plotted as a rising curve; each dot links to a unit">
+    ${D.arrow(x0 - 14, y0 + 8, W2 - 6, y0 + 8)}${D.arrow(x0 - 14, y0 + 8, x0 - 14, 12)}
+    ${D.t(x0 - 8, 20, 'how cracked you are', { cls: 'soft', size: 15 })}${D.t(W2 - 10, y0 + 30, 'sheets filled', { a: 'end', cls: 'soft', size: 15 })}
+    <g opacity=".35">${dividers}</g>
+    <path class="plotted" pathLength="1" d="M${pts.map(p => p.map(v => v.toFixed(1)).join(' ')).join(' L')}"/>
+    ${UNITS.map((u, i) => {
+      const [x, y] = pts[i], st = cleared(u) ? 'cleared' : isOpen(u) ? 'open' : 'locked';
+      return `<a href="#/unit/${u.id}" aria-label="${esc(u.title)}, ${st}"><title>${esc(u.title)}</title><circle class="nd ${st}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6"/>${u === cur ? `<circle class="here" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="13"/>` : ''}</a>`;
+    }).join('')}
+    ${cur ? (() => { const [x, y] = pts[UNITS.indexOf(cur)];
+      // The area up and left of a rising curve is empty. Too near the axis for that, so point at it from above.
+      return x > 165 ? D.t(x - 16, y - 14, 'you are here', { a: 'end', cls: 'r', size: 17 })
+        : D.t(x + 8, y - 66, 'you are here', { cls: 'r', size: 17 }) + D.arrow(x + 22, y - 58, x + 4, y - 16, 'r'); })() : ''}
+  </svg>`;
 }
-handlers.palette = openPalette;
-document.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
-  else if (stageKeys) stageKeys(e);
-});
+function viewPath() {
+  const cur = current();
+  app.innerHTML = `<h1>The whole road</h1><p class="mute">Units open in order. Already know something? Open any unit and choose to start there.</p>
+    ${PHASES.map(ph => {
+      const us = UNITS.filter(u => u.phase === ph.id), done = us.filter(cleared).length;
+      return `<details class="phase" ${us.includes(cur) || !cur ? 'open' : ''}><summary><span><b>${esc(ph.title)}</b> <span class="mute small">${esc(ph.blurb)}</span></span><span class="tag">${done} of ${us.length}</span></summary>
+        <div class="units">${us.map(u => `<a href="#/unit/${u.id}" class="${cleared(u) ? 'cleared' : isOpen(u) ? '' : 'locked'}"><span>${esc(u.title)}</span><span class="small mute">${cleared(u) ? 'done' : u === cur ? 'now' : isOpen(u) ? 'open' : ''}</span></a>`).join('')}</div></details>`;
+    }).join('')}`;
+}
 
-function updateHeader() {
-  const solved = PROBLEMS.filter(p => S.p[p.id] && S.p[p.id].solved).length;
-  $('#hdrProgress').innerHTML = `<span><b>${solved}</b>/${PROBLEMS.length} solved</span><div class="bar"><i style="width:${solved / PROBLEMS.length * 100}%"></i></div>`;
+// ---------- unit ----------
+function viewUnit(id) {
+  const u = U[id]; if (!u) return viewPath();
+  if (u.project) return viewProject(u);
+  const open = isOpen(u), read = !!S.lessons[u.id];
+  const row = pid => {
+    const p = P[pid], s = S.p[pid] || {};
+    const tags = `<span class="row"><span class="tag ${p.diff}">${p.diff}</span>${p.boss ? '<span class="tag boss">Boss</span>' : ''}${s.solved ? '<span class="tag">solved</span>' : ''}</span>`;
+    return read ? `<li><a href="#/p/${pid}"><span>${esc(p.title)}</span>${tags}</a></li>` : `<li><span class="lockd"><span>${esc(p.title)}</span>${tags}</span></li>`;
+  };
+  app.innerHTML = `<div class="read"><a class="small" href="#/path">All units</a>
+    <h1>${esc(u.title)}</h1><p class="mute">${esc(PHASES[u.phase].title)}</p>
+    ${!open ? `<p>This opens after <a href="#/unit/${UNITS[UNITS.indexOf(u) - 1].id}">${esc(UNITS[UNITS.indexOf(u) - 1].title)}</a>.</p><button class="btn" id="unlock">Start here anyway</button>` :
+      `<a class="btn ${read ? '' : 'go'}" href="#/read/${u.id}">${read ? 'Read the concept again' : 'Read the concept first'} (${u.mins} min)</a>`}
+    <h2>Problems</h2>${read ? '' : '<p class="mute small">These open once you have read the concept.</p>'}
+    <ul class="plist">${[...u.core, ...(u.boss ? [u.boss] : [])].map(row).join('')}</ul>
+    ${u.extra.length ? `<h3>Extra rounds</h3><p class="mute small">Optional, and they count toward XP and the Gauntlet.</p><ul class="plist">${u.extra.map(row).join('')}</ul>` : ''}</div>`;
+  const b = $('#unlock');
+  if (b) b.onclick = () => { S.unlocked[u.id] = true; save(); route(); };
+}
+function viewProject(u) {
+  const done = S.projects[u.id] = S.projects[u.id] || {};
+  app.innerHTML = `<div class="read"><a class="small" href="#/path">All units</a><h1>${esc(u.title)}</h1><p class="mute">${esc(PHASES[u.phase].title)} · on your own machine, about ${esc(u.project.time)}</p>
+    ${!isOpen(u) ? `<p>This opens after <a href="#/unit/${UNITS[UNITS.indexOf(u) - 1].id}">${esc(UNITS[UNITS.indexOf(u) - 1].title)}</a>.</p><button class="btn" id="unlock">Start here anyway</button>` : ''}
+    <div>${blocks(u.read || [])}</div>
+    <h2>The job</h2>${u.project.brief}
+    <h2>It counts as done when</h2>
+    ${u.project.check.map((c, i) => `<label class="check"><input type="checkbox" data-i="${i}" ${done[i] ? 'checked' : ''}><span>${c}</span></label>`).join('')}
+    <div class="teach"><label for="pnote"><h3 style="margin-top:.5em">What broke, and what you learned</h3></label><textarea id="pnote" class="plain" rows="4">${esc(S.teach['project:' + u.id] || '')}</textarea></div></div>`;
+  wireBlocks(app, u.read || []);
+  const b = $('#unlock');
+  if (b) b.onclick = () => { S.unlocked[u.id] = true; save(); route(); };
+  $('#pnote').oninput = e => { S.teach['project:' + u.id] = e.target.value; save(); };
+  $$('[data-i]', app).forEach(c => c.onchange = () => {
+    const was = cleared(u);
+    done[c.dataset.i] = c.checked; save();
+    if (!was && cleared(u)) { gain(400, 'u:' + u.id); stamp('SHIPPED'); toast('+400 XP'); }
+    head();
+  });
+}
+
+// ---------- reading ----------
+function viewRead(id) {
+  const u = U[id]; if (!u) return viewPath();
+  app.innerHTML = `<article class="read"><a class="small" href="#/unit/${id}">${esc(u.title)}</a>
+    <h1>${esc(u.title)}</h1>
+    <div>${blocks(u.read)}</div>
+    <section class="teach"><h2>Now say it back</h2>
+      <p>Close your eyes for a moment. Then explain the idea in your own words, as if to a friend. Nobody grades this. Writing it is how you find out what you did not understand.</p>
+      <label class="small mute" for="teach">Your explanation (it goes in your notebook)</label>
+      <textarea id="teach" class="plain" rows="5">${esc(S.teach[id] || '')}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn go" id="doneRead">${S.lessons[id] ? 'Save' : 'Mark as read'}</button><span class="small mute" id="teachMsg"></span></div>
+    </section></article>`;
+  wireBlocks(app, u.read);
+  $('#teach').oninput = e => { S.teach[id] = e.target.value; save(); };
+  $('#doneRead').onclick = () => {
+    if (($('#teach').value || '').trim().length < 20) { $('#teachMsg').textContent = 'Write at least a sentence first.'; return $('#teach').focus(); }
+    if (!S.lessons[id]) { S.lessons[id] = day(); dayLog().read++; gain(20, 'l:' + id); toast('+20 XP'); }
+    save(); location.hash = `#/unit/${id}`;
+  };
+}
+
+// ---------- solve ----------
+function startRematch(id) {
+  const s = ps(id);
+  if (s.rematching) return; // already under way: re-entering must not wipe the work
+  s.prev = { algo: s.algo, code: s.code }; s.algo = ''; s.example = ''; s.code = ''; s.stage = 'rough'; s.nudges = 0; s.fails = 0; s.rematching = true; s.bigGuess = ''; s.mine = ''; s.secs = 0; s.gaveUp = false; s.passed = false; s.revealed = false;
+  save(); store.del('sk:' + id).catch(() => {});
+}
+document.addEventListener('click', e => { const a = e.target.closest('[data-rematch]'); if (a) startRematch(a.dataset.rematch); });
+
+function statementHTML(p, opts = {}) {
+  return `<h2 style="margin-top:.3em">${esc(p.title)}</h2>
+    <div class="row small"><span class="tag ${p.diff}">${p.diff}</span>${p.boss ? '<span class="tag boss">Boss</span>' : ''}<span class="mute">aim for ${p.time} min</span></div>
+    ${p.desc}
+    ${(p.ex || []).map(([i, o, w]) => `<div class="ex"><b>in</b> ${esc(i)}<br><b>out</b> ${esc(o)}${w ? `<br><span class="mute">${esc(w)}</span>` : ''}</div>`).join('')}
+    ${p.constraints && p.constraints.length ? `<p class="small mute">${p.constraints.map(esc).join(' · ')}</p>` : ''}`;
+}
+function viewSolve(id, mode) {
+  const p = P[id]; if (!p) return viewPath();
+  timers.forEach(clearInterval); timers = []; // stage changes re-render without going through the router
+  const u = PU[id], s = ps(id), gauntlet = mode === 'gauntlet';
+  if (s.gaveUp && !s.passed && s.due <= day()) startRematch(id); // the comeback date has arrived
+  if (!S.lessons[u.id] && !gauntlet) return (location.hash = `#/read/${u.id}`);
+  const canCode = () => s.example.trim().length >= 3 && s.algo.trim().length >= 30;
+  const tabs = [['rough', 'Rough'], ['code', 'Code'], ['debrief', 'Debrief']];
+  const crumb = gauntlet ? 'Gauntlet: no topic given. Work out what kind of problem this is.' : `<a href="#/unit/${u.id}">${esc(u.title)}</a>`;
+  app.innerHTML = `<div class="small mute">${crumb}${s.rematching ? ' · Rematch: from a blank page' : ''}</div>
+    <div class="tabs" role="tablist">${tabs.map(([k, n]) => `<button role="tab" data-tab="${k}" aria-selected="${s.stage === k}" ${k === 'code' && !canCode() ? 'disabled' : ''} ${k === 'debrief' && !s.passed && !s.gaveUp ? 'disabled' : ''}>${n}</button>`).join('')}</div>
+    <div id="stage"></div>`;
+  const setStage = k => { s.stage = k; save(); viewSolve(id, mode); };
+  $$('[data-tab]', app).forEach(b => b.onclick = () => setStage(b.dataset.tab));
+  const box = $('#stage');
+  every(1000, () => { if (!document.hidden && s.stage !== 'debrief' && !s.passed) { s.secs++; if (s.secs % 15 === 0) save(); } });
+
+  if (s.stage === 'rough') {
+    box.innerHTML = `<div class="solve rough"><div class="statement">${statementHTML(p)}</div><div>
+      <div id="padHost"></div>
+      <h3>1. Work one example by hand</h3>
+      <textarea id="ex" rows="2" placeholder="Your own input, and the answer you worked out">${esc(s.example)}</textarea>
+      <h3>2. Write the steps, no Python</h3>
+      <p class="small mute">How did you get that answer? Write what you did, step by step, so a friend could follow it.</p>
+      <textarea id="algo" class="plain" rows="6">${esc(s.algo)}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn go" id="toCode">Turn it into code</button><span class="small mute" id="gate"></span></div>
+    </div></div>`;
+    mountPad($('#padHost'), 'sk:' + id);
+    const refresh = () => {
+      s.example = $('#ex').value; s.algo = $('#algo').value; save();
+      const c = canCode();
+      $('#toCode').disabled = !c; $('[data-tab=code]', app).disabled = !c;
+      $('#gate').textContent = c ? '' : !s.example.trim() ? 'Work an example first.' : 'Write your steps first, a couple of lines at least.';
+    };
+    $('#ex').oninput = $('#algo').oninput = refresh; refresh();
+    $('#toCode').onclick = () => setStage('code');
+    colour(box);
+  }
+
+  if (s.stage === 'code') {
+    if (!canCode()) return setStage('rough');
+    Engine.warm();
+    const noHelp = p.boss || gauntlet;
+    box.innerHTML = `<div class="solve"><div class="statement">
+        ${statementHTML(p)}
+        <h3>Your steps</h3><textarea id="algo2" class="plain" rows="5" style="width:100%">${esc(s.algo)}</textarea>
+        <details style="margin-top:6px"><summary class="small">Your sketch</summary><canvas class="thumb" id="thumb"></canvas></details>
+        <div id="nudges">${(p.nudge || []).slice(0, s.nudges).map(n => `<div class="nudge">${n}</div>`).join('')}</div>
+      </div><div>
+        <textarea id="code">${esc(s.code || p.start)}</textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn go" id="run">Run tests</button><span class="small mute">Ctrl + Enter</span>
+          <button class="btn" id="comments" title="Your own steps, pasted in as comments to code against">Paste my steps as comments</button>
+          <span style="flex:1"></span>
+          ${noHelp ? '' : '<button class="btn quiet" id="nudgeBtn"></button>'}
+          <button class="btn quiet" id="giveUp">Give up</button>
+        </div>
+        <div class="results" id="results" aria-live="polite"></div>
+      </div></div>`;
+    $('details', box).addEventListener('toggle', () => store.get('sk:' + id).then(v => { const c = $('#thumb'); if (c && v) paint(c.getContext('2d'), v, fit(c)); }).catch(() => {}));
+    colour(box);
+    $('#algo2').oninput = e => { s.algo = e.target.value; save(); };
+    const runIt = async () => {
+      s.code = cm.getValue(); save();
+      const out = $('#results'), btn = $('#run');
+      btn.disabled = true; out.innerHTML = '<p class="mute small">Starting.</p>';
+      const r = await Engine.run(s.code, p.tests, m => { out.innerHTML = `<p class="mute small">${esc(m)}</p>`; });
+      btn.disabled = false;
+      if (location.hash.split('/')[2] !== id) return;
+      showResult(p, s, r, out, mode, setStage);
+      updateNudge();
+    };
+    const cm = editor($('#code'), runIt);
+    cm.on && cm.on('change', () => { s.code = cm.getValue(); save(); });
+    $('#run').onclick = runIt;
+    $('#comments').onclick = () => {
+      const lines = s.algo.trim().split('\n').filter(l => l.trim()).map(l => '    # ' + l.trim());
+      const v = cm.getValue(), at = v.search(/^(def |class ).*$/m);
+      if (at < 0) return cm.setValue(lines.join('\n') + '\n' + v);
+      const eol = v.indexOf('\n', at);
+      cm.setValue(eol < 0 ? v + '\n' + lines.join('\n') + '\n    ' : v.slice(0, eol + 1) + lines.join('\n') + '\n' + v.slice(eol + 1));
+      cm.focus();
+    };
+    // Nudges cost XP and open only after a real attempt: time spent or a failed run.
+    const nudgeReady = () => s.fails >= 2 || s.secs >= (s.nudges + 1) * Math.max(120, p.time * 20);
+    const updateNudge = () => {
+      const b = $('#nudgeBtn'); if (!b) return;
+      const left = (p.nudge || []).length - s.nudges;
+      b.hidden = left <= 0;
+      b.disabled = !nudgeReady();
+      b.textContent = nudgeReady() ? `Ask for a nudge (${left} left, costs XP)` : 'Nudge opens after more effort';
+    };
+    updateNudge(); every(5000, updateNudge);
+    if ($('#nudgeBtn')) $('#nudgeBtn').onclick = () => { s.nudges++; save(); $('#nudges').insertAdjacentHTML('beforeend', `<div class="nudge">${p.nudge[s.nudges - 1]}</div>`); updateNudge(); };
+    $('#giveUp').onclick = () => {
+      if (!confirm('See the reference solution? No XP now, and this problem comes back in 2 days.')) return;
+      s.gaveUp = true; s.passed = false; s.rematching = false; s.due = addDays(2); s.box = 0; s.retry = true; save(); setStage('debrief');
+    };
+  }
+
+  if (s.stage === 'debrief') {
+    box.innerHTML = `<div class="deb read">
+      ${s.gaveUp && !s.passed ? `<p><b class="bad">Not this time.</b> This problem comes back on ${s.due}. Read the reference, close it, and then write it again yourself.</p>` : `<p><b class="ok">All tests pass.</b> ${s.nudges ? `You used ${s.nudges} nudge${s.nudges > 1 ? 's' : ''}.` : 'No nudges.'} Time on it: ${Math.floor(s.secs / 60)} min.${s.due ? ` Rematch on ${s.due}.` : ''}</p>`}
+      <h3>Before you see the reference</h3>
+      <label class="small mute" for="big">Time and space cost of your solution, as you see it</label><br>
+      <input type="text" id="big" style="width:100%" value="${esc(s.bigGuess || '')}">
+      <p style="margin-bottom:2px"><label class="small mute" for="mine">The general idea you used, in one line. This goes in your notebook.</label></p>
+      <textarea id="mine" class="plain" rows="2">${esc(s.mine || '')}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn go" id="reveal" ${s.revealed ? 'hidden' : ''}>Compare with the reference</button></div>
+      <div id="ref" ${s.revealed ? '' : 'hidden'}>
+        <h3>Reference</h3><pre><code>${esc(p.sol)}</code></pre>
+        ${p.big ? `<p><b>Cost:</b> ${esc(p.big)}</p>` : ''}${p.idea ? `<p><b>The idea:</b> ${esc(p.idea)}</p>` : ''}
+        ${s.prev && s.prev.code ? `<details><summary class="small">Your code last round</summary><pre><code>${esc(s.prev.code)}</code></pre></details>` : ''}
+        <p class="small mute">Yours doesn't have to match. If it's cleaner, keep yours.</p>
+        <div class="row">${next(id, gauntlet)}<button class="btn quiet" id="again">Solve it again from blank</button></div>
+      </div></div>`;
+    $('#big').oninput = e => { s.bigGuess = e.target.value; save(); };
+    $('#mine').oninput = e => { s.mine = e.target.value; save(); };
+    $('#reveal').onclick = () => { s.revealed = true; save(); viewSolve(id, mode); };
+    if ($('#again')) $('#again').onclick = () => { s.rematching = false; startRematch(id); viewSolve(id, mode); };
+    colour(box);
+  }
+}
+function next(id, gauntlet) {
+  if (gauntlet) return '<a class="btn go" href="#/">Back to today</a>';
+  const u = PU[id], open = required(u).find(x => !solved(x));
+  return open ? `<a class="btn go" href="#/p/${open}">Next: ${esc(P[open].title)}</a><a class="btn" href="#/">Back to today</a>` : `<a class="btn go" href="#/">Back to today</a>`;
+}
+function showResult(p, s, r, out, mode, setStage) {
+  const log = r.stdout ? `<div class="small mute" style="margin-top:8px">What you printed</div><div class="log">${esc(r.stdout)}</div>` : '';
+  if (r.compileError) { s.fails++; save(); out.innerHTML = `<div class="fail"><b>Your code stopped before the tests could run.</b>\n${esc(r.compileError)}</div>${log}`; return; }
+  const results = r.results, passed = results.filter(x => x.ok).length, first = results.findIndex(x => !x.ok);
+  if (first >= 0) {
+    s.fails++; save();
+    const f = results[first], t = p.tests[first];
+    // Only the first failure is shown: it is a clue to think about, not a list of cases to patch one by one.
+    out.innerHTML = `<div class="fail"><b>${passed} of ${results.length} tests pass.</b> First failure:\n${esc(t.label)}\n${f.err ? esc(f.err) : `want ${esc(f.want)}\n got ${esc(f.got)}`}</div>${f.log ? `<div class="log">${esc(f.log)}</div>` : ''}${log}`;
+    return;
+  }
+  out.innerHTML = `<div class="passall"><b class="ok">${results.length} of ${results.length} tests pass.</b></div>${log}`;
+  win(p, s, mode);
+  setTimeout(() => setStage('debrief'), 1300);
+}
+function win(p, s, mode) {
+  const firstTime = !s.solved;
+  const gauntlet = mode === 'gauntlet';
+  let xp = BASE[p.diff] || 40;
+  if (p.boss || gauntlet) xp *= 2;
+  xp = Math.round(xp * Math.max(0.4, 1 - s.nudges * 0.2));
+  if (!firstTime) xp = Math.round(xp / 2);
+  if (s.retry) xp = Math.round(xp / 2);
+  const round = (s.rematching ? (s.box || 0) + 1 : 0);
+  s.box = round; s.due = addDays(GAP[Math.min(round, GAP.length - 1)]);
+  if (firstTime) { s.solved = day(); dayLog().solved++; }
+  s.passed = true; s.rematching = false; s.retry = false; s.gaveUp = false; s.revealed = false;
+  gain(xp, 'p:' + p.id);
+  toast(`+${xp} XP`);
+  const u = PU[p.id];
+  stamp(p.boss ? 'CRACKED' : gauntlet ? 'SURVIVED' : 'PASSED');
+  if (cleared(u)) toast(`Unit done: ${u.title}`);
+}
+
+// ---------- gauntlet ----------
+function viewGauntlet() {
+  const id = gauntletPick();
+  if (!id) { app.innerHTML = `<div class="read"><h1>Gauntlet</h1><p>The Gauntlet gives you one problem with no topic label, no nudges and double XP. Real problems don't announce their pattern, so this is where you learn to spot it.</p><p>It opens after you've read your first core-patterns concept.</p><a class="btn go" href="#/">Back to today</a></div>`; return; }
+  const p = P[id];
+  app.innerHTML = `<div class="read"><h1>Gauntlet</h1><p>One problem. No topic label, no nudges, double XP. Spot the pattern yourself.</p>
+    <div class="row"><a class="btn go" id="enter" href="#/p/${id}/gauntlet">Enter (aim for ${p.time} min)</a><button class="btn" id="reroll">Draw another</button></div>
+    ${solved(id) ? '<p class="small mute">You have solved this one before, so it starts from a blank page.</p>' : ''}</div>`;
+  $('#enter').onclick = () => { if (solved(id)) startRematch(id); };
+  $('#reroll').onclick = () => { dayLog().g = null; save(); viewGauntlet(); };
+}
+
+// ---------- free rough ----------
+function viewRough() {
+  S.scratch = S.scratch || '# Try anything. print() shows up below.\n';
+  app.innerHTML = `<h1>Rough</h1><p class="mute">A blank pad and a Python prompt, for ideas that aren't tied to a problem yet.</p>
+    <div class="solve"><div id="padHost"></div><div><textarea id="code">${esc(S.scratch)}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn go" id="run">Run</button><span class="small mute">Ctrl + Enter. numpy and sqlite3 load when you import them.</span></div>
+      <div class="results" id="results" aria-live="polite"></div></div></div>`;
+  mountPad($('#padHost'), 'sk:scratch');
+  const go = async () => {
+    const out = $('#results');
+    const r = await Engine.run(cm.getValue(), [], m => { out.innerHTML = `<p class="mute small">${esc(m)}</p>`; });
+    out.innerHTML = `<div class="log">${esc((r.stdout || '') + (r.compileError ? '\n' + r.compileError : '')) || '(nothing printed)'}</div>`;
+  };
+  const cm = editor($('#code'), go);
+  cm.on && cm.on('change', () => { S.scratch = cm.getValue(); save(); });
+  $('#run').onclick = go;
+}
+
+// ---------- notebook ----------
+function viewNotebook() {
+  const entries = [
+    ...UNITS.filter(u => S.teach[u.id]).map(u => ({ t: u.title, k: 'Concept, in your words', b: S.teach[u.id], href: `#/read/${u.id}` })),
+    ...UNITS.filter(u => S.teach['project:' + u.id]).map(u => ({ t: u.title, k: 'Project notes', b: S.teach['project:' + u.id], href: `#/unit/${u.id}` })),
+    ...Object.keys(S.p).filter(id => P[id] && (S.p[id].mine || S.p[id].algo)).map(id => ({ t: P[id].title, k: 'Your idea and steps', b: [S.p[id].mine, S.p[id].algo].filter(Boolean).join('\n\n'), href: `#/p/${id}` }))
+  ];
+  app.innerHTML = `<div class="read"><h1>Notebook</h1><p class="mute">Everything you've written in your own words. This is your real study guide.</p>
+    <input type="search" id="q" placeholder="Search your notes" aria-label="Search your notes" style="width:100%">
+    <div id="notes"></div></div>`;
+  const show = q => {
+    const hit = entries.filter(e => !q || (e.t + ' ' + e.b).toLowerCase().includes(q));
+    $('#notes').innerHTML = hit.length ? hit.map(e => `<div class="note-item"><a href="${e.href}"><b>${esc(e.t)}</b></a> <span class="small mute">${e.k}</span><div class="plain">${esc(e.b)}</div></div>`).join('') : `<p class="mute">${entries.length ? 'No notes match that search.' : 'Nothing yet. Read your first concept and say it back.'}</p>`;
+  };
+  $('#q').oninput = e => show(e.target.value.toLowerCase().trim()); show('');
+}
+
+// ---------- settings ----------
+function viewSettings() {
+  app.innerHTML = `<div class="read"><h1>Settings</h1>
+    <h2>Daily pace</h2><p class="mute">Today's sheet stops when this is done. You can always add one more.</p>
+    ${Object.entries(PACE).map(([k, v]) => `<label class="check"><input type="radio" name="pace" value="${k}" ${S.pace === k ? 'checked' : ''}><span>${v.label}</span></label>`).join('')}
+    <h2>Backup</h2><p class="mute">Your progress and sketches live only in this browser. Export before you clear browser data or change machine.</p>
+    <div class="row"><button class="btn" id="exp">Export backup</button><label class="btn">Import backup<input type="file" id="imp" accept=".json" hidden></label><button class="btn quiet" id="wipe">Erase everything</button></div></div>`;
+  $$('[name=pace]', app).forEach(r => r.onchange = () => { S.pace = r.value; save(); });
+  $('#exp').onclick = async () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify({ progress: S, sketches: await store.all().catch(() => ({})) })], { type: 'application/json' }));
+    a.download = `cracked-backup-${day()}.json`; a.click(); URL.revokeObjectURL(a.href); toast('Backup exported');
+  };
+  $('#imp').onchange = async e => {
+    try {
+      const data = JSON.parse(await e.target.files[0].text());
+      if (!data.progress || typeof data.progress.p !== 'object') throw new Error('That file is not a Cracked backup.');
+      if (!confirm('Replace your current progress with this backup?')) return;
+      for (const [k, v] of Object.entries(data.sketches || {})) await store.set(k, v);
+      localStorage.setItem(KEY, JSON.stringify(data.progress)); location.reload();
+    } catch (err) { toast('Import failed: ' + err.message); }
+  };
+  $('#wipe').onclick = () => { if (confirm('Erase all progress, code and notes? Sketches stay until you clear browser data.')) { localStorage.removeItem(KEY); location.hash = '#/'; location.reload(); } };
 }
 
 // ---------- router ----------
+let timers = [];
+const every = (ms, f) => timers.push(setInterval(f, ms));
 function route() {
-  timers.forEach(clearInterval); timers = []; stageKeys = null;
-  const pal = $('.palette-bg'); if (pal) pal.remove();
-  updateHeader();
-  for (const k in mcqAnswer) delete mcqAnswer[k];
-  const [, a, b] = (location.hash || '#/').split('/');
-  document.querySelectorAll('nav a').forEach(n => n.classList.toggle('on', n.getAttribute('href') === '#/' + (a === 'p' ? 'problems' : a || '')));
-  if (S.mock && a !== 'mock') { location.hash = '#/mock'; return; } // stay in the exam
-  if (a === 'learn') b ? viewLesson(b) : viewLearn();
-  else if (a === 'problems') viewProblems();
-  else if (a === 'p') viewProblem(b);
-  else if (a === 'mcq') viewMCQ(b);
-  else if (a === 'mock') viewMock();
-  else if (a === 'syntax') viewSyntax();
-  else viewPlan();
+  timers.forEach(clearInterval); timers = [];
+  const [, page, id, mode] = location.hash.split('/');
+  if (!page) viewHome();
+  else if (page === 'path') viewPath();
+  else if (page === 'unit') viewUnit(id);
+  else if (page === 'read') viewRead(id);
+  else if (page === 'p') viewSolve(id, mode);
+  else if (page === 'gauntlet') viewGauntlet();
+  else if (page === 'rough') viewRough();
+  else if (page === 'notebook') viewNotebook();
+  else if (page === 'settings') viewSettings();
+  else viewHome();
+  head();
   window.scrollTo(0, 0);
 }
 window.addEventListener('hashchange', route);
