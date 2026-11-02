@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leapfrog Prep — Coding Exam Bootcamp</title>
+<link rel="stylesheet" href="vendor/codemirror/codemirror.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a href="#/" class="brand"><span class="leaf">⟋</span> leapfrog<b>prep</b></a>
+  <nav>
+    <a href="#/">Plan</a>
+    <a href="#/learn">Learn</a>
+    <a href="#/problems">Problems</a>
+    <a href="#/mcq">MCQs</a>
+    <a href="#/mock">Mock Exam</a>
+    <a href="#/syntax">Syntax</a>
+    <a href="revise.html">Revise</a>
+  </nav>
+  <button class="search-btn" data-act="palette" title="Jump to any problem, lesson or page">Search <kbd>Ctrl K</kbd></button>
+  <div class="hdr-progress" id="hdrProgress" title="Problems solved"></div>
+  <div class="lang">
+    <label for="lang">Language</label>
+    <select id="lang">
+      <option value="py">Python</option>
+      <option value="js">JavaScript</option>
+    </select>
+  </div>
+</header>
+<main id="app"></main>
+<div id="toasts" aria-live="polite"></div>
+
+<script src="vendor/codemirror/codemirror.min.js"></script>
+<script src="vendor/codemirror/python.min.js"></script>
+<script src="vendor/codemirror/javascript.min.js"></script>
+<script src="vendor/codemirror/matchbrackets.min.js"></script>
+<script src="vendor/codemirror/closebrackets.min.js"></script>
+<script src="vendor/codemirror/active-line.min.js"></script>
+<script src="vendor/codemirror/runmode.min.js"></script>
+<script src="data/plan.js"></script>
+<script src="data/lessons.js"></script>
+<script src="data/mcqs.js"></script>
+<script src="data/problems-1.js"></script>
+<script src="data/problems-2.js"></script>
+<script src="data/problems-3.js"></script>
+<script src="data/problems-4.js"></script>
+<script src="runner.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
