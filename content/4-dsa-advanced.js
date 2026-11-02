@@ -212,7 +212,7 @@ steps((() => {
     if ((i === 1 && j === 1) || (i === 2 && j === 3) || (i === 3 && j === 5)) show(a[i - 1] === b[j - 1] ? `<code>${a[i - 1]}</code> matches, so take one more than the diagonal: both prefixes without this letter.` : `<code>${a[i - 1]}</code> and <code>${b[j - 1]}</code> differ, so one of them isn't used. Take the larger of the cell above and the cell to the left.`, i, j);
   }
   return f;
-})(), 150),
+})(), 185),
 `<h2>Reading a table</h2><p>On the pad, draw the arrows for one cell: which cells does it read from? That tells you the fill order. If each cell reads above and left, then a row-by-row loop works.</p>
 <h2>Knapsack: the classic shape</h2><p>Items with a size and value, and a limited capacity. State: the best value from the first i items with capacity c. The last decision for item i is: take it, or don't. This take-or-skip pattern with a limit appears everywhere.</p>`,
 fig(D.flow({ a: [20, 40, 170, 60, 'state: first i items,\ncapacity c'], b: [260, 8, 200, 54, 'skip: same capacity,\ni − 1 items', 'b'], c: [260, 78, 200, 54, 'take: capacity − size,\ni − 1 items, + value', 'g'], d: [540, 40, 150, 60, 'choose the\nbetter one', 'y'] }, [['a', 'b'], ['a', 'c'], ['b', 'd'], ['c', 'd']]), 145),

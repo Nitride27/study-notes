@@ -7,7 +7,7 @@ steps([
   { n: 'A hash is one-way: easy to compute, practically impossible to reverse. To check a login, hash what was typed and compare. But two users with the same password get the same hash, so attackers precompute hashes of common passwords.', d: D.grid([['user', 'hash'], ['sam', '7f3a'], ['ira', '7f3a']], { x: 40, y: 10, s: 90, hl: { '1,1': 'y', '2,1': 'y' } }) + D.t(340, 80, 'same hash: a giveaway', { cls: 'r' }) },
   { n: 'A salt is random and unique per user, mixed in before hashing. Same password, different hash. Precomputed tables become useless. The salt isn\'t secret, and it sits right beside the hash.', d: D.grid([['user', 'salt', 'hash'], ['sam', 'x9', 'c21e'], ['ira', 'k2', '88ab']], { x: 40, y: 10, s: 90, hl: { '1,2': 'g', '2,2': 'g' } }) },
   { n: 'Stretch it: hash thousands of times, so each guess costs the attacker real time. A login takes 100 ms, which you won\'t notice. A billion guesses take years. Real code uses bcrypt or argon2, which do all this for you.', d: D.flow({ a: [30, 40, 170, 60, 'password + salt'], b: [260, 30, 180, 80, 'hash, hash, hash,\n...100,000 times', 'y'], c: [510, 40, 170, 60, 'slow to attack', 'g'] }, [['a', 'b'], ['b', 'c']]) }
-], 170),
+], 290),
 `<h2>Sessions: proving who you are, on every request</h2><p>HTTP forgets you between requests. So after login, the server hands you a token, and you send it on every later request.</p>`,
 fig(D.flow({ c: [20, 50, 130, 60, 'client'], s: [290, 50, 130, 60, 'server'], d: [560, 50, 140, 60, 'token store', 'y'] }, [['s', 'd', 'checks']]) + D.arrow(150, 66, 290, 66, 'b') + D.t(220, 56, 'password', { a: 'middle', cls: 'b', size: 14 }) + D.arrow(290, 94, 150, 94, 'g') + D.t(220, 112, 'token', { a: 'middle', cls: 'g', size: 14 }), 130),
 `<h2>Rules you don't get to skip</h2><ul>
@@ -167,7 +167,7 @@ steps([
 <tr><td><b>Invalidate on write</b></td><td>When data changes, delete the cached copy</td><td>You have to find every place data changes</td></tr>
 <tr><td><b>Write through</b></td><td>Writes go to cache and database together</td><td>Slower writes</td></tr></table>
 <h2>The stampede</h2>`,
-fig(D.flow({ a: [20, 10, 120, 36, 'req 1'], b: [20, 56, 120, 36, 'req 2'], c: [20, 102, 120, 36, 'req 1000', 'r'], d: [370, 40, 200, 70, 'database\nfalls over', 'r'] }, [['a', 'd'], ['b', 'd'], ['c', 'd']]) + D.t(600, 80, 'popular key expired', { cls: 'soft', size: 14 }), 150, 'A popular key expires, and a thousand requests all miss at the same moment. Fix: let one request recompute it while the others wait.'),
+fig(D.flow({ a: [20, 10, 120, 36, 'req 1'], b: [20, 56, 120, 36, 'req 2'], c: [20, 102, 120, 36, 'req 1000', 'r'], d: [370, 40, 200, 70, 'database\nfalls over', 'r'] }, [['a', 'd'], ['b', 'd'], ['c', 'd']]) + D.t(590, 70, 'popular key', { cls: 'soft', size: 14 }) + D.t(590, 92, 'expired', { cls: 'soft', size: 14 }), 150, 'A popular key expires, and a thousand requests all miss at the same moment. Fix: let one request recompute it while the others wait.'),
 think('You cache a user\'s profile for 5 minutes. They change their name, and refresh. They see the old name. What is the simplest fix?', 'Delete that cache key when the name is written. TTL stays on as a safety net, in case some write path forgets.')
 ], core: [
 { id: 'lru-cache', title: 'LRU cache', diff: 'Medium', time: 18,

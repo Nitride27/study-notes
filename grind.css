@@ -94,6 +94,22 @@ a:hover .nd, a:focus .nd { stroke: var(--ink); stroke-width: 3; }
 .units a.locked { color: var(--soft); }
 .units a.cleared span:first-child { text-decoration: line-through; text-decoration-color: var(--red); }
 
+.stampline { font: 2.4rem/1.1 var(--hand); color: var(--red); margin: .2em 0; }
+
+/* Memory: graphite fades as a topic slips. */
+.mem { margin-top: 18px; }
+.mem h3 { margin-top: 0; }
+.mem-row { margin: 8px 0; }
+.mem-row b { font: 1.05rem var(--hand); }
+.mem-cells { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+.mem-cells a, .mem-cells i { display: block; width: 16px; height: 16px; border: 1px solid var(--rule); background: var(--sheet); }
+.mem-cells a.fresh { background: var(--graphite); border-color: var(--graphite); }
+.mem-cells a.fading { background: #A3B09A; border-color: #72806A; }
+.mem-cells a.rusty { border: 2px solid var(--red); }
+.mem-cells a:hover { outline: 2px solid var(--ink); outline-offset: 1px; }
+.skip-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@media (pointer: coarse) { .mem-cells a, .mem-cells i { width: 24px; height: 24px; } }
+
 /* Reading */
 .read { max-width: 760px; }
 .read .lede { font-size: 1.15rem; }

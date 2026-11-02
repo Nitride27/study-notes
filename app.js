@@ -4,7 +4,7 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s === undefined || s === null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const app = $('#app');
 const KEY = 'cracked-v1';
-const blank = { xp: 0, days: {}, lessons: {}, teach: {}, p: {}, projects: {}, unlocked: {}, pace: 'steady' };
+const blank = { xp: 0, days: {}, lessons: {}, teach: {}, p: {}, projects: {}, unlocked: {}, recall: {}, pace: 'steady' };
 const S = (() => {
   const raw = localStorage.getItem(KEY);
   try { return Object.assign({}, blank, JSON.parse(raw || '{}')); }
@@ -42,6 +42,9 @@ for (const u of UNITS) {
   if (u.boss) { u.boss = norm(u.boss); P[u.boss].boss = true; }
 }
 const U = Object.fromEntries(UNITS.map(u => [u.id, u]));
+const phaseOf = u => PHASES.find(ph => ph.id === u.phase);
+const trackOf = u => phaseOf(u).track;
+const memItems = () => reviewItems(S, UNITS, trackOf, day());
 const ps = id => (S.p[id] = S.p[id] || { stage: 'rough', example: '', algo: '', code: '', secs: 0, nudges: 0, fails: 0 });
 const solved = id => !!(S.p[id] && S.p[id].solved);
 const required = u => [...u.core, ...(u.boss ? [u.boss] : [])];
@@ -80,7 +83,6 @@ function toast(msg) {
   t.className = 'toast'; t.textContent = msg; $('#toasts').appendChild(t);
   setTimeout(() => t.remove(), 3600);
 }
-const GAP = [3, 7, 21, 60, 180]; // days until the next rematch, per successful round
 const BASE = { Easy: 30, Medium: 60, Hard: 100 };
 
 // ---------- sketch storage ----------
@@ -259,22 +261,52 @@ function head() {
 }
 
 // ---------- today ----------
-const PACE = { slow: { read: 1, solve: 2, label: 'Slow: 1 concept, 2 problems a day' }, steady: { read: 1, solve: 3, label: 'Steady: 1 concept, 3 problems a day' }, sprint: { read: 2, solve: 6, label: 'Sprint: 2 concepts, 6 problems a day' } };
+const PACE = { slow: { read: 1, solve: 2, keep: 1, label: 'Slow: 1 concept, 2 new problems, 1 old problem to keep sharp' }, steady: { read: 1, solve: 3, keep: 2, label: 'Steady: 1 concept, 3 new problems, 2 old problems to keep sharp' }, sprint: { read: 2, solve: 6, keep: 3, label: 'Sprint: 2 concepts, 6 new problems, 3 old problems to keep sharp' } };
 const due = () => Object.keys(S.p).filter(id => P[id] && S.p[id].due && S.p[id].due <= day() && (S.p[id].solved || S.p[id].retry)).sort((a, b) => S.p[a].due < S.p[b].due ? -1 : 1);
 function gauntletPick() {
   const log = dayLog();
   if (log.g && P[log.g]) return log.g;
-  const pool = UNITS.filter(u => !u.project && S.lessons[u.id] && u.phase >= 1).flatMap(u => [...u.extra, ...u.core]);
+  const pool = UNITS.filter(u => !u.project && S.lessons[u.id] && trackOf(u) !== 'Python').flatMap(u => [...u.extra, ...u.core]);
   if (pool.length < 5) return null;
-  const fresh = pool.filter(id => !solved(id));
-  const from = fresh.length ? fresh : pool;
+  // New problems come from the topic you've touched least lately, so DSA keeps growing while you're deep in backend.
+  const fresh = pool.filter(id => !solved(id)), oldest = trackAges(memItems()).map(([t]) => t);
+  const quiet = oldest.find(t => fresh.some(id => trackOf(PU[id]) === t));
+  const from = quiet ? fresh.filter(id => trackOf(PU[id]) === quiet) : fresh.length ? fresh : pool;
   log.g = from[Math.floor(Math.random() * from.length)]; save();
   return log.g;
 }
+// Once the path has moved past DSA, one new interview problem a day keeps it growing. Spread across patterns, easiest first.
+function ladderPick() {
+  const log = dayLog(), cur = current();
+  if (log.ladder !== undefined) return log.ladder && !solved(log.ladder) && !S.p[log.ladder]?.retry ? log.ladder : null;
+  const dsa = UNITS.filter(u => !u.project && trackOf(u) === 'DSA' && S.lessons[u.id]);
+  let pick = null;
+  if (!cur || trackOf(cur) !== 'DSA') {
+    const RANK = { Easy: 0, Medium: 1, Hard: 2 }, used = u => u.extra.filter(solved).length;
+    const open = dsa.flatMap(u => u.extra.filter(id => !solved(id) && !S.p[id]?.retry).map(id => ({ id, n: used(u), d: RANK[P[id].diff] ?? 1 })));
+    open.sort((a, b) => a.n - b.n || a.d - b.d);
+    pick = open.length ? open[0].id : null;
+  }
+  log.ladder = pick; save();
+  return pick;
+}
+// Chosen once a day, so the sheet doesn't reshuffle while you work through it.
+function keepSharp() {
+  const log = dayLog();
+  if (!log.keep) { const r = pickReviews(memItems(), day(), (PACE[S.pace] || PACE.steady).keep); log.keep = r.keys; log.behind = r.behind ? r : null; save(); }
+  return log.keep.filter(k => !log.done.includes(k));
+}
 function plan() {
   const log = dayLog(), pace = PACE[S.pace] || PACE.steady, items = [];
-  due().slice(0, 2).forEach(id => items.push({ kind: 'Rematch', what: P[id].title, href: `#/p/${id}`, key: 'p:' + id, rematch: id }));
-  let reads = log.read, slots = pace.solve + log.bonus - log.solved;
+  keepSharp().forEach(k => {
+    const id = k.slice(2);
+    if (k[0] === 'r' && U[id]) items.push({ kind: 'Recall', what: U[id].title, href: `#/recall/${id}`, key: k });
+    if (k[0] === 'p' && P[id]) items.push({ kind: 'Rematch', what: P[id].title, href: `#/p/${id}`, key: k, rematch: id });
+  });
+  if (gauntletPick() && (!S.lastCold || isoDays(S.lastCold, day()) >= 7)) items.push({ kind: 'Cold', what: 'A problem with no topic label', href: '#/gauntlet', key: 'g:' + day() });
+  const lc = ladderPick();
+  if (lc) items.push({ kind: 'LeetCode', what: P[lc].title, href: `#/p/${lc}`, key: 'p:' + lc });
+  let reads = log.behind ? pace.read : log.read, slots = pace.solve + log.bonus - log.solved - (lc ? 1 : 0);
   for (const u of UNITS) {
     if (cleared(u)) continue;
     if (u.project) { if (slots > 0) items.push({ kind: 'Project', what: u.title, href: `#/unit/${u.id}`, key: 'u:' + u.id }); break; }
@@ -293,7 +325,7 @@ function viewHome() {
   const log = dayLog(), items = plan();
   const doneList = log.done.filter(k => !items.some(i => i.key === k)).map(k => {
     const [t, id] = [k.slice(0, 1), k.slice(2)];
-    return t === 'p' && P[id] ? [P[id].boss ? 'Boss' : 'Solve', P[id].title] : t === 'l' && U[id] ? ['Read', U[id].title] : t === 'u' && U[id] ? ['Project', U[id].title] : null;
+    return t === 'p' && P[id] ? [P[id].boss ? 'Boss' : 'Solve', P[id].title] : t === 'l' && U[id] ? ['Read', U[id].title] : t === 'u' && U[id] ? ['Project', U[id].title] : t === 'r' && U[id] ? ['Recall', U[id].title] : t === 'g' ? ['Cold', 'A problem with no topic label'] : null;
   }).filter(Boolean);
   const finished = !items.length && !!doneList.length;
   const g = gauntletPick();
@@ -301,6 +333,7 @@ function viewHome() {
     <section class="today">
       <h1>Today's sheet</h1>
       <p class="mute">${finished ? 'Done for today. Sleep is when this sticks.' : items.length ? 'Work top to bottom. Read before you solve.' : 'Nothing is planned yet.'}</p>
+      ${log.behind ? `<p class="nudge">Memory first: ${log.behind.backlog} old problems are overdue, so no new concepts today. They return once ${log.behind.limit} or fewer are overdue.</p>` : ''}
       <ul class="todo">
         ${doneList.map(([k, w]) => `<li class="done"><a href="#/notebook"><span class="kind">${k}</span><span class="what">${esc(w)}</span></a></li>`).join('')}
         ${items.map(i => `<li><a href="${i.href}"${i.rematch ? ` data-rematch="${i.rematch}"` : ''}><span class="kind">${i.kind}</span><span class="what">${esc(i.what)}</span></a></li>`).join('')}
@@ -312,10 +345,69 @@ function viewHome() {
       <h3>Last 12 weeks</h3>
       <div class="heat" aria-label="Days you worked in the last 12 weeks">${Array.from({ length: 84 }, (_, i) => { const k = addDays(i - 83), xp = (S.days[k] || {}).xp || 0; return `<i class="${xp >= 150 ? 'l3' : xp >= 60 ? 'l2' : xp ? 'l1' : ''}" title="${k}: ${xp} XP"></i>`; }).join('')}</div>
     </section>
-    <section><div class="curve-wrap">${curveSVG()}</div><p class="small mute">Each dot is one concept. <a href="#/path">See every unit</a>.</p></section>
+    <section><div class="curve-wrap">${curveSVG()}</div><p class="small mute">Each dot is one concept. <a href="#/path">See every unit</a>.</p>${memoryMap()}</section>
   </div>`;
   const more = $('#oneMore');
   if (more) more.onclick = () => { dayLog().bonus++; save(); viewHome(); };
+}
+// Graphite fades as a topic slips. Each square is a unit, and opening one tests you on it.
+function memoryMap() {
+  const items = memItems(), LABEL = { fresh: 'fresh', fading: 'fading', rusty: 'rusty' };
+  const rows = [...new Set(PHASES.map(ph => ph.track).filter(Boolean))].map(track => {
+    const units = UNITS.filter(u => !u.project && trackOf(u) === track), counts = { fresh: 0, fading: 0, rusty: 0 };
+    const cells = units.map(u => {
+      const f = freshness(items.filter(i => i.unit === u.id).map(i => i.r));
+      if (f) counts[f]++;
+      const inner = `<span class="skip-text">${esc(u.title)}: ${f ? LABEL[f] : 'not learned yet'}</span>`;
+      return f ? `<a class="${f}" href="#/recall/${u.id}" title="${esc(u.title)}: ${LABEL[f]}">${inner}</a>` : `<i title="${esc(u.title)}: not learned yet">${inner}</i>`;
+    }).join('');
+    const mine = items.filter(i => i.track === track), last = mine.reduce((a, i) => i.last > a ? i.last : a, '');
+    const age = last ? isoDays(last, day()) : -1;
+    const words = mine.length ? `${counts.fresh} fresh, ${counts.fading} fading, ${counts.rusty} rusty. Last practised ${age === 0 ? 'today' : age === 1 ? 'yesterday' : age + ' days ago'}.` : 'Not started.';
+    return `<div class="mem-row"><div class="spread"><b>${esc(track)}</b><span class="small mute">${words}</span></div><div class="mem-cells">${cells}</div></div>`;
+  }).join('');
+  return `<section class="mem"><h3>What you still remember</h3>${rows}
+    <details class="small"><summary>How old topics stay alive</summary>
+      <p>Every solved problem comes back from a blank page after 3, 7, 21, 60 and 180 days. Every concept comes back too, as a Recall sheet: you explain it from memory, then compare.</p>
+      <p>Nothing you've learned goes ${NEGLECT} days without practice, even with nothing due. So working on backend still brings back DSA. Once a week you also get a problem with no topic label, new if possible, from whichever topic you've touched least lately.</p>
+      <p>If too much piles up, new concepts pause until you've caught up. Dark squares are on schedule, pale ones are slipping, and red-edged ones need attention. These shades are estimates from time passed, not measurements of your memory.</p>
+    </details></section>`;
+}
+function viewRecall(id) {
+  const u = U[id]; if (!u || u.project) return viewPath();
+  if (!S.lessons[id]) return viewUnit(id);
+  const st = conceptState(S, id), probes = u.read.filter(b => b.think);
+  const first = u.read.find(b => typeof b === 'string') || '', core = (first.match(/<p[^>]*>[\s\S]*?<\/p>/) || [''])[0];
+  const mine = [...required(u), ...u.extra].filter(x => S.p[x] && S.p[x].due && (S.p[x].solved || S.p[x].retry));
+  app.innerHTML = `<div class="read"><a class="small" href="#/">Back to today</a>
+    <h1>From memory: ${esc(u.title)}</h1>
+    <p>No peeking. What is the idea, how would you recognise a problem that needs it, and what goes wrong if you get it wrong? Draw it if that helps.</p>
+    <div id="padHost"></div>
+    <label class="small mute" for="rc" style="display:block;margin-top:10px">What you remember</label>
+    <textarea id="rc" class="plain" rows="5"></textarea>
+    <div class="row" style="margin-top:8px"><button class="btn go" id="cmp">Compare with what you knew</button><span class="small mute" id="rcMsg"></span></div>
+    <div id="rcOut" hidden>
+      <h3>What you wrote when you learned it</h3><div class="note-item"><div class="plain">${esc(S.teach[id] || '(nothing saved)')}</div></div>
+      <h3>The lesson's core</h3>${core}
+      <p class="small"><a href="#/read/${id}">Reread the whole lesson</a></p>
+      ${probes.length ? `<h3>Can you still answer these?</h3>${blocks(probes)}` : ''}
+      <h3>How did that go?</h3>
+      <div class="row"><button class="btn" data-grade="0">Forgot most of it</button><button class="btn" data-grade="1">Shaky</button><button class="btn" data-grade="2">Solid</button></div>
+    </div>
+    ${mine.length ? `<h2>Problems from this unit</h2><ul class="plist">${mine.map(x => `<li><a href="#/p/${x}" data-rematch="${x}"><span>${esc(P[x].title)}</span><span class="small mute">back on ${esc(S.p[x].due)}, or solve it now</span></a></li>`).join('')}</ul>` : ''}</div>`;
+  mountPad($('#padHost'), 'rc:' + id);
+  $('#cmp').onclick = () => {
+    if ($('#rc').value.trim().length < 20) { $('#rcMsg').textContent = 'Write at least a sentence first, even if it feels wrong.'; return $('#rc').focus(); }
+    $('#rcOut').hidden = false; $('#cmp').hidden = true; $('#rc').readOnly = true; colour(app);
+  };
+  $$('[data-grade]', app).forEach(b => b.onclick = () => {
+    const g = +b.dataset.grade;
+    S.recall[id] = gradeConcept(st, g, day());
+    store.del('rc:' + id).catch(() => {});
+    gain(15, 'r:' + id); toast(`+15 XP. Back on ${S.recall[id].due}`);
+    if (g === 2) stamp('STILL SHARP');
+    location.hash = g === 0 ? `#/read/${id}` : '#/';
+  });
 }
 function curveSVG() {
   const W2 = 760, H2 = 400, n = UNITS.length, x0 = 50, y0 = 350;
@@ -364,7 +456,7 @@ function viewUnit(id) {
     return read ? `<li><a href="#/p/${pid}"><span>${esc(p.title)}</span>${tags}</a></li>` : `<li><span class="lockd"><span>${esc(p.title)}</span>${tags}</span></li>`;
   };
   app.innerHTML = `<div class="read"><a class="small" href="#/path">All units</a>
-    <h1>${esc(u.title)}</h1><p class="mute">${esc(PHASES[u.phase].title)}</p>
+    <h1>${esc(u.title)}</h1><p class="mute">${esc(phaseOf(u).title)}</p>
     ${!open ? `<p>This opens after <a href="#/unit/${UNITS[UNITS.indexOf(u) - 1].id}">${esc(UNITS[UNITS.indexOf(u) - 1].title)}</a>.</p><button class="btn" id="unlock">Start here anyway</button>` :
       `<a class="btn ${read ? '' : 'go'}" href="#/read/${u.id}">${read ? 'Read the concept again' : 'Read the concept first'} (${u.mins} min)</a>`}
     <h2>Problems</h2>${read ? '' : '<p class="mute small">These open once you have read the concept.</p>'}
@@ -375,7 +467,7 @@ function viewUnit(id) {
 }
 function viewProject(u) {
   const done = S.projects[u.id] = S.projects[u.id] || {};
-  app.innerHTML = `<div class="read"><a class="small" href="#/path">All units</a><h1>${esc(u.title)}</h1><p class="mute">${esc(PHASES[u.phase].title)} · on your own machine, about ${esc(u.project.time)}</p>
+  app.innerHTML = `<div class="read"><a class="small" href="#/path">All units</a><h1>${esc(u.title)}</h1><p class="mute">${esc(phaseOf(u).title)} · on your own machine, about ${esc(u.project.time)}</p>
     ${!isOpen(u) ? `<p>This opens after <a href="#/unit/${UNITS[UNITS.indexOf(u) - 1].id}">${esc(UNITS[UNITS.indexOf(u) - 1].title)}</a>.</p><button class="btn" id="unlock">Start here anyway</button>` : ''}
     <div>${blocks(u.read || [])}</div>
     <h2>The job</h2>${u.project.brief}
@@ -410,7 +502,7 @@ function viewRead(id) {
   $('#teach').oninput = e => { S.teach[id] = e.target.value; save(); };
   $('#doneRead').onclick = () => {
     if (($('#teach').value || '').trim().length < 20) { $('#teachMsg').textContent = 'Write at least a sentence first.'; return $('#teach').focus(); }
-    if (!S.lessons[id]) { S.lessons[id] = day(); dayLog().read++; gain(20, 'l:' + id); toast('+20 XP'); }
+    if (!S.lessons[id]) { S.lessons[id] = day(); S.recall[id] = conceptState(S, id); dayLog().read++; gain(20, 'l:' + id); toast('+20 XP'); }
     save(); location.hash = `#/unit/${id}`;
   };
 }
@@ -527,7 +619,9 @@ function viewSolve(id, mode) {
     if ($('#nudgeBtn')) $('#nudgeBtn').onclick = () => { s.nudges++; save(); $('#nudges').insertAdjacentHTML('beforeend', `<div class="nudge">${p.nudge[s.nudges - 1]}</div>`); updateNudge(); };
     $('#giveUp').onclick = () => {
       if (!confirm('See the reference solution? No XP now, and this problem comes back in 2 days.')) return;
-      s.gaveUp = true; s.passed = false; s.rematching = false; s.due = addDays(2); s.box = 0; s.retry = true; save(); setStage('debrief');
+      s.gaveUp = true; s.passed = false; s.rematching = false; s.due = addDays(2); s.box = 0; s.retry = true; s.last = day();
+      if ((dayLog().keep || []).includes('p:' + id) && !dayLog().done.includes('p:' + id)) dayLog().done.push('p:' + id); // you faced it today; it returns on its date
+      save(); setStage('debrief');
     };
   }
 
@@ -555,7 +649,7 @@ function viewSolve(id, mode) {
   }
 }
 function next(id, gauntlet) {
-  if (gauntlet) return '<a class="btn go" href="#/">Back to today</a>';
+  if (gauntlet) return S.mock ? '<a class="btn go" href="#/mock">Back to the mock</a>' : '<a class="btn go" href="#/">Back to today</a>';
   const u = PU[id], open = required(u).find(x => !solved(x));
   return open ? `<a class="btn go" href="#/p/${open}">Next: ${esc(P[open].title)}</a><a class="btn" href="#/">Back to today</a>` : `<a class="btn go" href="#/">Back to today</a>`;
 }
@@ -582,10 +676,10 @@ function win(p, s, mode) {
   xp = Math.round(xp * Math.max(0.4, 1 - s.nudges * 0.2));
   if (!firstTime) xp = Math.round(xp / 2);
   if (s.retry) xp = Math.round(xp / 2);
-  const round = (s.rematching ? (s.box || 0) + 1 : 0);
-  s.box = round; s.due = addDays(GAP[Math.min(round, GAP.length - 1)]);
+  s.box = nextBox(s, day()); s.due = addDays(gapOf(s.box)); s.last = day();
+  if (gauntlet) { S.lastCold = day(); if (!dayLog().done.includes('g:' + day())) dayLog().done.push('g:' + day()); }
   if (firstTime) { s.solved = day(); dayLog().solved++; }
-  s.passed = true; s.rematching = false; s.retry = false; s.gaveUp = false; s.revealed = false;
+  s.passed = true; s.rematching = false; s.retry = false; s.gaveUp = false; s.revealed = false; s.wonAt = Date.now();
   gain(xp, 'p:' + p.id);
   toast(`+${xp} XP`);
   const u = PU[p.id];
@@ -600,9 +694,49 @@ function viewGauntlet() {
   const p = P[id];
   app.innerHTML = `<div class="read"><h1>Gauntlet</h1><p>One problem. No topic label, no nudges, double XP. Spot the pattern yourself.</p>
     <div class="row"><a class="btn go" id="enter" href="#/p/${id}/gauntlet">Enter (aim for ${p.time} min)</a><button class="btn" id="reroll">Draw another</button></div>
-    ${solved(id) ? '<p class="small mute">You have solved this one before, so it starts from a blank page.</p>' : ''}</div>`;
+    ${solved(id) ? '<p class="small mute">You have solved this one before, so it starts from a blank page.</p>' : ''}
+    <h2>Timed mock</h2><p>Practise real interview or exam pressure: two problems from everything you've read in DSA, no labels, no nudges, 45 minutes. Say your steps out loud as you go.</p>
+    <div class="row"><a class="btn" href="#/mock">${S.mock ? 'Back to your mock' : 'Open the mock'}</a></div>
+    ${(S.mocks || []).length ? `<h3>Past mocks</h3><ul class="plist">${S.mocks.slice(-5).reverse().map(m => `<li><span class="lockd"><span>${esc(m.day)}</span><span>${m.solved} of ${m.total} solved in ${m.mins} min</span></span></li>`).join('')}</ul>` : ''}</div>`;
   $('#enter').onclick = () => { if (solved(id)) startRematch(id); };
   $('#reroll').onclick = () => { dayLog().g = null; save(); viewGauntlet(); };
+}
+
+// ---------- timed mock ----------
+const MOCK_MINS = 45;
+function mockPick() {
+  const pool = UNITS.filter(u => !u.project && S.lessons[u.id] && trackOf(u) === 'DSA').flatMap(u => [...u.core, ...u.extra, ...(u.boss ? [u.boss] : [])]);
+  const fresh = pool.filter(id => !solved(id)), from = fresh.length >= 2 ? fresh : pool;
+  const pick = list => list.length ? list[Math.floor(Math.random() * list.length)] : null;
+  const first = pick(from.filter(id => P[id].diff !== 'Hard')) || pick(from);
+  const second = pick(from.filter(id => id !== first && P[id].diff !== 'Easy')) || pick(from.filter(id => id !== first));
+  return first && second ? [first, second] : null;
+}
+function viewMock() {
+  const m = S.mock;
+  if (!m) {
+    const can = mockPick();
+    app.innerHTML = `<div class="read"><a class="small" href="#/gauntlet">Gauntlet</a><h1>Timed mock</h1><p>Two problems, no topic labels and no nudges, in ${MOCK_MINS} minutes. Solve in any order. The clock keeps running if you leave this page.</p>
+      ${can ? '<button class="btn go" id="start">Start the clock</button>' : '<p class="mute">This opens once you\'ve read a few DSA concepts.</p>'}</div>`;
+    if (can) $('#start').onclick = () => {
+      can.forEach(id => { if (solved(id)) startRematch(id); });
+      S.mock = { ids: can, start: Date.now(), ends: Date.now() + MOCK_MINS * 60000 }; save(); viewMock();
+    };
+    return;
+  }
+  const wins = () => m.ids.filter(id => S.p[id]?.passed && S.p[id].wonAt >= m.start && S.p[id].wonAt <= m.ends);
+  const finish = () => {
+    S.mocks = S.mocks || [];
+    S.mocks.push({ day: day(), solved: wins().length, total: m.ids.length, mins: Math.min(MOCK_MINS, Math.ceil((Date.now() - m.start) / 60000)) });
+    S.mock = null; save(); location.hash = '#/gauntlet';
+  };
+  const left = () => Math.max(0, m.ends - Date.now());
+  app.innerHTML = `<div class="read"><h1>Timed mock</h1><p class="stampline" id="clock" role="timer"></p>
+    <ul class="plist">${m.ids.map((id, i) => `<li><a href="#/p/${id}/gauntlet"><span>Problem ${i + 1}: ${esc(P[id].title)}</span><span class="tag">${wins().includes(id) ? 'solved' : P[id].diff}</span></a></li>`).join('')}</ul>
+    <button class="btn" id="end">Finish the mock</button></div>`;
+  const tick = () => { const s = Math.ceil(left() / 1000), el = $('#clock'); if (el) el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} left`; if (!s || wins().length === m.ids.length) finish(); };
+  $('#end').onclick = finish;
+  tick(); every(1000, tick);
 }
 
 // ---------- free rough ----------
@@ -675,8 +809,10 @@ function route() {
   else if (page === 'path') viewPath();
   else if (page === 'unit') viewUnit(id);
   else if (page === 'read') viewRead(id);
+  else if (page === 'recall') viewRecall(id);
   else if (page === 'p') viewSolve(id, mode);
   else if (page === 'gauntlet') viewGauntlet();
+  else if (page === 'mock') viewMock();
   else if (page === 'rough') viewRough();
   else if (page === 'notebook') viewNotebook();
   else if (page === 'settings') viewSettings();

@@ -18,6 +18,12 @@ unit({ id: 'project-api', phase: 7, title: 'Project: A real REST API', project: 
   <p>You've built each of these by hand already. Notice how much of the framework now makes sense to you.</p>`,
   check: ['It\'s deployed at a public URL (Render, Fly.io or a similar service) and you\'ve called it from your phone', 'One user provably can\'t read another\'s records. You wrote a test for exactly this.', 'Passwords use bcrypt or argon2, and no secrets are in the repo', 'An automated test run happens on each push, using GitHub Actions', 'You looked at the slowest query with <code>EXPLAIN</code> and added an index'] } });
 
+unit({ id: 'project-sockets', phase: 7, title: 'Project: Talk over real sockets', project: { time: 'a weekend',
+  brief: `<p>The browser's Python can't open sockets, so do it here. Keep it small: the point is to see for yourself what frameworks do for you.</p>
+  <ul><li>A TCP echo server and client using Python's <code>socket</code> module.</li><li>A small chat server for several clients at once, using threads or <code>asyncio</code>, with your own message framing.</li><li>A tiny HTTP server, with no framework, that a real browser can load a page from. Reuse your parser.</li><li>Use <code>curl -v</code>, <code>dig</code> and <code>traceroute</code> on a site you like, and capture your own handshake in Wireshark.</li></ul>
+  <p>Beej's Guide to Network Programming, and his Guide to Network Concepts, are free online and worth keeping open.</p>`,
+  check: ['Two terminals can chat through your server, and a client disconnecting doesn\'t crash it', 'Sending a large message in small pieces still arrives whole', 'A real browser loads a page from your HTTP server', 'You found the SYN, SYN-ACK and ACK in a Wireshark capture of your own server'] } });
+
 unit({ id: 'project-scale', phase: 7, title: 'Project: Make it survive', project: { time: 'two weeks',
   brief: `<p>A URL shortener, or extend your API. This time the goal is to <b>make it fail, then make it stop failing.</b></p>
   <ul><li>Run with Docker Compose: app, Postgres and Redis.</li><li>Add caching, and rate limiting.</li><li>Add a background worker for something slow, like click analytics, with retries and a dead-letter list.</li><li>Load-test it with a tool like <code>k6</code> or <code>locust</code>.</li></ul>`,

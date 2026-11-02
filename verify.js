@@ -62,6 +62,35 @@ for (const u of ctx.UNITS) {
 }
 for (const id of Object.keys(BANK)) if (!usedBank.has(id)) console.log('note: bank problem not on the path: ' + id);
 fs.rmSync(tmp, { force: true });
+// The memory system: old topics must keep coming back while new ones are being learned.
+load(path.join(here, 'memory.js'));
+vm.runInContext(`(() => {
+  const ok = (c, m) => { if (!c) throw new Error('memory: ' + m); };
+  const units = [{ id: 'arr', track: 'DSA', core: ['two-sum', 'sort'], extra: [] }, { id: 'api', track: 'Backend', core: ['router'], extra: [] }];
+  const trackFor = u => u.track, today = '2026-06-30';
+  const solvedOn = (d, box, due) => ({ solved: d, last: d, box, due });
+  const S = { lessons: { arr: '2026-03-01', api: '2026-06-29' }, recall: {}, p: { 'two-sum': solvedOn('2026-06-10', 3, '2026-08-09'), sort: solvedOn('2026-06-20', 3, '2026-08-19'), router: solvedOn('2026-06-29', 0, '2026-07-02') } };
+  const items = reviewItems(S, units, trackFor, today);
+  ok(items.find(i => i.key === 'p:router').r > 0.9, 'a fresh problem should be near full recall');
+  ok(!items.find(i => i.key === 'p:two-sum').isDue, 'fixture: DSA is not due');
+  const r = pickReviews(items, today, 2);
+  ok(r.keys.includes('p:two-sum'), 'a neglected topic comes back even with nothing due: ' + r.keys);
+  ok(r.keys.includes('r:arr'), 'an overdue concept comes back: ' + r.keys);
+  const crowd = { lessons: {}, recall: {}, p: {} }, many = { id: 'big', track: 'Backend', core: [], extra: [] };
+  for (let i = 0; i < 20; i++) { many.core.push('b' + i); crowd.p['b' + i] = solvedOn('2026-06-20', 0, '2026-06-23'); }
+  crowd.p.x = solvedOn('2026-06-25', 0, '2026-06-28');
+  const mix = pickReviews(reviewItems(crowd, [many, { id: 'd', track: 'DSA', core: ['x'], extra: [] }], trackFor, today), today, 2);
+  ok(mix.keys.includes('p:x'), 'a backlog in one topic must not crowd out another: ' + mix.keys);
+  ok(mix.behind && mix.backlog === 21, 'a big backlog pauses new concepts');
+  ok(nextBox({ rematching: true, box: 1, due: today, nudges: 0 }, today) === 2, 'a due, unaided rematch moves up');
+  ok(nextBox({ rematching: true, box: 1, due: '2026-07-20', nudges: 0 }, today) === 1, 'early practice must not skip ahead');
+  ok(nextBox({ rematching: true, box: 1, due: today, nudges: 1 }, today) === 1, 'a rematch with nudges does not move up');
+  ok(nextBox({ rematching: true, retry: true, box: 2, due: today }, today) === 0, 'a given-up problem starts over');
+  ok(gradeConcept({ box: 2, due: today }, 0, today).box === 0 && gradeConcept({ box: 2, due: today }, 2, today).box === 3, 'concept grades move the gap');
+  ok(Math.abs(recallChance(7, 7) - 0.9) < 1e-9, 'the curve is 90% at the gap');
+  ok(freshness([]) === '' && freshness([0.95]) === 'fresh' && freshness([0.85]) === 'fading' && freshness([0.4]) === 'rusty', 'freshness bands');
+})()`, ctx);
+console.log('memory checks: OK');
 const lessons = ctx.UNITS.filter(u => !u.project).length, projects = ctx.UNITS.filter(u => u.project).length;
 console.log(`${ctx.UNITS.length} units (${lessons} concepts, ${projects} projects), ${seenP.size} problems, ${count} checked, ${runs} test runs: ${fails ? fails + ' FAILURES' : 'all OK'}`);
 process.exit(fails ? 1 : 0);
